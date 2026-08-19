@@ -6,14 +6,14 @@ Traceflow sends a specially **marked** packet and observes which hosts it passes
 through — like `traceroute`, but it sees not only IP routing but also tunnels,
 VNIs and switching on hypervisor hosts. An eBPF program on the TC hook of each
 interface recognizes "our" packet and emits an **observation** — a record that
-the packet passed this point. A Health Monitor collects observations from every
+the packet passed this point. The **collector** groups observations from every
 host by the shared run `id` and reconstructs the full path.
 
 ```
- HM / client                 hypervisor A                 hypervisor B
+ client                      hypervisor A                 hypervisor B
  ┌─────────┐   marked pkt    ┌────────────┐   overlay    ┌────────────┐
  │  client │ ───────────────▶│ agent+eBPF │ ────────────▶│ agent+eBPF │
- └─────────┘  DSCP63+magic   │  TC hook   │   VXLAN/tap  │  TC hook   │
+ └─────────┘  DSCP62+magic   │  TC hook   │   VXLAN/tap  │  TC hook   │
       ▲                      └─────┬──────┘              └─────┬──────┘
       │        observations        │  ringbuf                  │
       │        (JSON / HTTP)        ▼                           ▼
@@ -109,7 +109,7 @@ expects.
   (created/removed by OVN or any controller) and tags observations with the
   device VNI.
 
-## Client — the probe sender (part of the HM)
+## Client — the probe sender
 
 | Command | What |
 |---------|------|
@@ -203,7 +203,7 @@ agent/                 eBPF loader, ring reader, responder, watchers, metrics, e
 client/                marked-probe sender + AF_PACKET sniffer
 collector/             HTTP collector: group observations by run id, assemble paths
 scripts/               demo-netns.sh, lab-2az-vxlan.sh
-tests/                 unit (Go) + integration (netns / veth / VXLAN / OVN, no-veth)
+tests/                 unit (Go) + integration (netns / veth / VXLAN / OVN)
 ```
 
 ## Build
@@ -280,7 +280,7 @@ sudo ./scripts/lab-2az-vxlan.sh probe
 sudo ./scripts/lab-2az-vxlan.sh down
 ```
 
-Why internal ports: an OVS internal port is a real kernel netdev (not veth) that
+Why internal ports: an OVS internal port is a real kernel netdev that
 stays attached to the OVS datapath even after being moved into a netns — so two
 netns "chassis" are wired together through the host datapath with zero veth. (The
 `ovs-sandbox` / `make sandbox` tool uses the **dummy** datapath, where no real

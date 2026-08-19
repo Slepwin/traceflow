@@ -8,7 +8,7 @@ Traceflow отправляет специально маркированный �
 хосты он проходит — как `traceroute`, но видит не только IP-маршрутизацию, а
 ещё туннели, VNI и коммутацию на хостах-гипервизорах. eBPF-программа на TC-хуке
 каждого интерфейса распознаёт «наш» пакет и порождает **observation** — запись о
-том, что пакет прошёл через эту точку. Health Monitor собирает observations со
+том, что пакет прошёл через эту точку. **Коллектор** собирает observations со
 всех хостов по общему `id` и восстанавливает полный путь.
 
 ## Как распознаётся «наш» пакет — два уровня фильтрации
@@ -89,7 +89,7 @@ agent/                 загрузчик eBPF, reader, responder, watchers, м�
 client/                отправитель marked-пакетов + AF_PACKET-sniffer
 collector/             HTTP-коллектор: группировка observations по run id
 scripts/               demo-netns.sh, lab-2az-vxlan.sh
-tests/                 unit (Go) + интеграционные (netns/veth/VXLAN/OVN, без veth)
+tests/                 unit (Go) + интеграционные (netns/veth/VXLAN/OVN)
 ```
 
 ### Agent — по одному на каждый гипервизор
@@ -117,7 +117,7 @@ tests/                 unit (Go) + интеграционные (netns/veth/VXLA
 отправляет сам стек ядра, уходят с `src=собственный IP` и до получателя не
 доходят.
 
-### Client — отправитель (часть HM)
+### Client — отправитель проб
 
 | Команда | Что делает |
 |---------|-----------|
@@ -389,7 +389,7 @@ sudo ./scripts/lab-2az-vxlan.sh probe
 sudo ./scripts/lab-2az-vxlan.sh down
 ```
 
-OVS internal-порт — это реальный kernel-netdev (не veth), остающийся в OVS-
+OVS internal-порт — это реальный kernel-netdev, остающийся в OVS-
 datapath даже после переноса в netns, так что два netns-«шасси» соединяются через
 host-datapath без veth. (`ovs-sandbox`/`make sandbox` использует **dummy**
 datapath — реальных пакетов через kernel-netdev'ы там нет, eBPF/TC их не видят.)
