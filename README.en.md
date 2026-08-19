@@ -1,5 +1,7 @@
 # Traceflow
 
+> 🇷🇺 Документация на русском: **[README.md](README.md)**
+
 eBPF-based network-path diagnostics for overlay (VXLAN) networks.
 
 Traceflow sends a specially **marked** packet and observes which hosts it passes
@@ -297,6 +299,7 @@ kernel datapath is required.)
   transport header and is not marked.
 - **Portability**: TCX (≥6.6) with a clsact/cls_bpf netlink fallback; the program
   touches only stable UAPI (`__sk_buff` + packet bytes), so no CO-RE is needed.
+
 ## OVS-DPDK / AF_XDP
 
 With OVS-DPDK the datapath is in userspace, so the TC path can miss traffic:
@@ -323,6 +326,3 @@ With OVS-DPDK the datapath is in userspace, so the TC path can miss traffic:
 
 - **vhost-user VM ports** — the VM connects over a unix socket + shared memory,
   with no netdev, so eBPF cannot observe at the port regardless.
-
-## Notes / limitations (cont.)
-```
