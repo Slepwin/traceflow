@@ -240,7 +240,7 @@ make test    # Go unit-тесты (без root)
 make itest   # интеграционная suite (нужен root; TESTS ниже)
 ```
 
-Интеграционная suite (каждый тест чисто SKIP'ается, если его переквизитов нет):
+Интеграционная suite (каждый тест чисто SKIP'ается, если его пререквизитов нет):
 
 - `test_veth_multinetns.sh` — routed `ns1 — ns2(router) — ns3`: hop 0/1 через
   L3-роутер, корреляция по run-id, ответ dst-VM.
@@ -264,7 +264,7 @@ inter-AZ overlay — **kernel VXLAN-устройство**.
 ```
  host: OVS br-underlay  (normal L2 switch)
           ula ── moved into ns az1        ulb ── moved into ns az2
- ┌───────────────── ns az1 (AZ1) ────────┐   ┌──────────── ns az2 (AZ2) ─────────┐
+ ┌──────────────── ns az1 (AZ1) ────────┐   ┌──────────── ns az2 (AZ2) ─────────┐
  │  ula   172.16.9.1/24  (underlay)      │   │  ulb   172.16.9.2/24              │
  │  vxlan0 id100 remote .2 ── VXLAN(100) ┼───┼── vxlan0 id100 remote .1          │
  │    10.0.0.1/24  (VM-A)                │   │    10.0.0.2/24  (VM-B)            │
