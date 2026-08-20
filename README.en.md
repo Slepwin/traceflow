@@ -110,14 +110,14 @@ control block. With `--hmac-key` a 32-byte HMAC-SHA256 is appended, making the p
          │  4 B   │                           │ 1B │ 1B │   8 B (ns)    │  (optional)   │
          └────────┴──────────────────────────┴────┴────┴───────────────┴───────────────┘
            TFLO      run id, shared by all hops   │    │   send time
-                                        intercept ┘    └ need_response
+                                          deliver ┘    └ need_response
 ```
 
 | Field | Size | Meaning |
 |-------|------|---------|
 | `magic` | 4 | `0x54464C4F` (`"TFLO"`), network byte order |
 | `id` | 16 | UUIDv4 — the run identifier, shared by every hop |
-| `intercept` | 1 | `1` = ask agents to intercept (drop) the packet |
+| `deliver` | 1 | `0` (default) = agent intercepts at the destination; `1` = deliver the original to the VM |
 | `need_response` | 1 | `1` = the destination should reply |
 | `timestamp` | 8 | send time, unix nanoseconds (little-endian) — used for latency |
 
@@ -141,9 +141,9 @@ flowchart TD
     RG --> M
     M -- no --> PASS2([pass · not ours])
     M -- yes --> OBS[[emit observation → ring buffer]]
-    OBS --> G{intercept AND allow_intercept<br/>AND not encapsulated?}
-    G -- yes --> DROP([drop · TC_ACT_SHOT])
-    G -- "no" --> PASS3([pass · forward])
+    OBS --> G{answer here?<br/>need_response · not deliver<br/>dst is a local VM · not encapsulated}
+    G -- yes --> DROP([drop original · agent answers · TC_ACT_SHOT])
+    G -- "no" --> PASS3([pass · forward to the VM])
 ```
 
 The parsers handle IPv4 and IPv6 (bounded extension-header walk), 802.1Q / 802.1AD
@@ -184,10 +184,12 @@ them:
 - **`auto`** (the default) — try VXLAN first on every packet, fall back to a regular
   frame. The reported `iface_type` is always the detected one, never `auto`.
 
-**Two independent safety guards** mean a packet is dropped only if `intercept` was
-requested **and** the attachment allows it (`--allow-intercept`) **and** — checked in
-the kernel — the packet is not VXLAN-encapsulated. Transit and tunnel traffic is
-therefore *only ever observed*, never dropped.
+**Interception is scoped to the destination.** By default the agent drops the original
+probe once it reaches the destination VM and answers on its behalf, so the VM's own stack
+does not reply too. The kernel drops it only when it will answer — `need_response` is set,
+the inner `dst_ip` is a local VM (so transit and source hops never drop), the frame is not
+VXLAN-encapsulated, and this agent responds. A probe sent with `--deliver` is passed
+through to the VM instead, and the agent stays silent.
 
 ---
 
@@ -271,7 +273,7 @@ tests/                 Go unit tests + integration suite (netns / VXLAN / OVN)
 One agent per hypervisor. On startup it:
 
 1. loads the eBPF program via `cilium/ebpf` (pure Go, no CGO);
-2. writes the config map (`allow_intercept`, `iface_type`);
+2. writes the config map (`iface_type`, `respond`, `tcp_respond`) and the local-VM-IP set;
 3. attaches the observation program;
 4. reads observations from the ring buffer and prints JSON (or ships them onward);
 5. **answers only for the destination VM.**
@@ -284,10 +286,14 @@ With `--xdp` it attaches at the **XDP** hook instead (ingress only) — see
 **Responding.** Observations are captured on *every* hop, but a reply to
 `need_response=1` is built only when the inner `dst_ip` is a local VM address
 (`--local-ip`, or resolved by the watcher). Transit and VTEP nodes are observe-only.
-Replies leave via **AF_PACKET** (an L2 raw socket), bypassing the kernel routing stack;
-the address swap reuses the VM's own MAC/IP, which is exactly what OVN port security
-expects. TCP is answered by a small, sequence-correct userspace responder
-(`--tcp-respond=false` lets the real VM stack answer instead).
+By default the agent also **intercepts** the original at the destination (the eBPF drops
+it) so the VM's own stack does not answer too; a probe sent with `--deliver` is passed
+through to the VM, which then replies itself. Replies leave via **AF_PACKET** (an L2 raw
+socket), bypassing the kernel routing stack; the address swap reuses the VM's own MAC/IP,
+which is exactly what OVN port security expects. TCP is answered by a small,
+sequence-correct userspace responder (`--tcp-respond=false` lets the real VM stack answer
+instead). The AF_PACKET responder taps ingress before the TC hook, so it still sees and
+answers a probe even though the original is dropped.
 
 **Watch modes (dynamic attach).**
 
@@ -303,7 +309,6 @@ expects. TCP is answered by a small, sequence-correct userspace responder
 |------|---------|---------|
 | `--iface NAME` | — | attach to a single interface (static mode) |
 | `--iface-type` | `auto` | `auto` \| `regular` \| `vxlan` |
-| `--allow-intercept` | `false` | permit dropping intercepted packets (plain frames only) |
 | `--node-id` | hostname | identifier stamped on every observation |
 | `--respond` | `true` | reply to `need_response=1` for local VM IPs |
 | `--tcp-respond` | `true` | answer TCP in userspace; `false` defers to the VM stack |
@@ -335,7 +340,9 @@ IPv4 without a VLAN is sent through an AF_INET raw socket (`IP_HDRINCL`) and the
 routes it. IPv6 or a VLAN tag needs L2 framing, so the probe goes out via AF_PACKET
 (`--iface` + `--dst-mac`, optional `--vlan`). `--as-vm` fills the source IP/MAC from
 the OVS tap so OVN port security accepts the injected frame. `--hmac-key` signs the
-probe. Replies are caught with an AF_PACKET sniffer and matched by run id.
+probe. By default the destination agent intercepts the probe and answers it; add
+`--deliver` to let the probe reach the VM so its own stack replies. Replies are caught
+with an AF_PACKET sniffer and matched by run id.
 
 ```bash
 # ICMP echo across the overlay, wait for the reply
