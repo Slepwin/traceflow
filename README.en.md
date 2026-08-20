@@ -33,7 +33,7 @@ at the ones that carry the mark.
 - [Build](#build)
 - [Container](#container)
 - [Tests](#tests)
-- [Two-AZ VXLAN lab (no veth)](#two-az-vxlan-lab-no-veth)
+- [Two-AZ VXLAN lab](#two-az-vxlan-lab)
 - [OVS-DPDK / AF_XDP](#ovs-dpdk--af_xdp)
 - [Notes & limitations](#notes--limitations)
 
@@ -261,7 +261,7 @@ agent/                 eBPF loader, ring reader, responder, watchers, metrics, e
 client/                marked-probe sender + AF_PACKET reply sniffer
 collector/             HTTP collector: group observations by run id, assemble paths
 scripts/               demo-netns.sh, lab-2az-vxlan.sh
-tests/                 Go unit tests + integration suite (netns / veth / VXLAN / OVN)
+tests/                 Go unit tests + integration suite (netns / VXLAN / OVN)
 ```
 
 ---
@@ -457,15 +457,15 @@ Each integration test SKIPs cleanly when its prerequisites are missing:
 | `test_hmac.sh` | signed probe answered, unsigned rejected (checked via metrics) |
 | `test_clsact.sh` | the clsact/cls_bpf fallback (`TRACEFLOW_FORCE_CLSACT=1`) |
 | `test_xdp.sh` | the XDP attach path (`--xdp`): program on the netdev, ingress observation |
-| `test_vxlan_2az.sh` | two chassis / two AZs joined by VXLAN, **no veth** (needs OVS) |
+| `test_vxlan_2az.sh` | two chassis / two AZs joined by VXLAN (needs OVS) |
 
 ---
 
-## Two-AZ VXLAN lab (no veth)
+## Two-AZ VXLAN lab
 
-Two OVN-style chassis in two AZs, joined by VXLAN, with **no veth anywhere**: the
-inter-netns underlay is built from **OVS internal ports** (real kernel netdevs), and the
-inter-AZ overlay is a **kernel VXLAN device**.
+Two OVN-style chassis in two AZs, joined by VXLAN: the inter-netns underlay is built from
+**OVS internal ports** (real kernel netdevs), and the inter-AZ overlay is a **kernel VXLAN
+device**.
 
 ```
  host: OVS br-underlay  (normal L2 switch)
@@ -492,7 +492,7 @@ sudo ./scripts/lab-2az-vxlan.sh down
 
 *Why internal ports:* an OVS internal port is a real kernel netdev that stays attached
 to the OVS datapath even after being moved into a netns, so two netns "chassis" are
-wired together through the host datapath with zero veth. (`ovs-sandbox` / `make sandbox`
+wired together through the host datapath. (`ovs-sandbox` / `make sandbox`
 uses the **dummy** datapath, where no real packets flow through kernel netdevs, so
 eBPF/TC cannot observe them — a real kernel datapath is required.)
 
