@@ -1,0 +1,173 @@
+name: release
+
+# Cut a release when a semver tag is pushed, e.g.:
+#   git tag v1.4.0 && git push origin v1.4.0
+#
+# Produces, for that tag:
+#   - three multi-arch (amd64+arm64) images on GHCR:
+#       ghcr.io/<owner>/traceflow-agent
+#       ghcr.io/<owner>/traceflow-client
+#       ghcr.io/<owner>/traceflow-collector
+#     tagged  :X.Y.Z  :X.Y  and (for non-prerelease tags) :latest
+#   - static binary tarballs (linux/amd64, linux/arm64) + SHA256SUMS
+#   - a GitHub Release with auto-generated notes and all the above attached.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write # create the GitHub Release
+  packages: write # push images to GHCR
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------- images ----
+  images:
+    name: image (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [agent, client, collector]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Lowercase the owner - GHCR repositories must be lowercase, but
+      # github.repository_owner preserves the original case (e.g. "Slepwin").
+      - name: Compute lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      # QEMU is needed because the arm64 runtime stages run `apt-get` under
+      # emulation. The Go build itself is cross-compiled natively (BUILDPLATFORM).
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/traceflow-${{ matrix.component }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=traceflow-${{ matrix.component }}
+            org.opencontainers.image.description=Traceflow ${{ matrix.component }} - eBPF path diagnostics for OVN overlay networks
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          target: ${{ matrix.component }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  # -------------------------------------------------------------- binaries ----
+  binaries:
+    name: binaries (linux/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      # eBPF toolchain to generate the bpf bindings (host-native; the object is
+      # endianness-, not arch-specific, so one generate serves every arch).
+      - name: Install eBPF toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev linux-libc-dev
+          d="$(ls -d /usr/include/*-linux-gnu | head -1)"; sudo ln -sf "$d/asm" /usr/include/asm
+
+      - name: Generate eBPF bindings
+        run: go generate ./...
+
+      - name: Cross-compile binaries
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          for cmd in agent client collector; do
+            go build -trimpath -ldflags="-s -w" -o "dist/$cmd" "./$cmd"
+          done
+
+      - name: Package tarball
+        run: |
+          ver="${GITHUB_REF_NAME}"
+          name="traceflow_${ver}_linux_${{ matrix.goarch }}"
+          install -m0644 README.md README.en.md dist/ 2>/dev/null || cp README.md README.en.md dist/
+          tar -C dist -czf "${name}.tar.gz" agent client collector README.md README.en.md
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goarch }}
+          path: |
+            traceflow_*.tar.gz
+            traceflow_*.tar.gz.sha256
+          retention-days: 1
+
+  # --------------------------------------------------------------- release ----
+  release:
+    name: github release
+    runs-on: ubuntu-latest
+    needs: [images, binaries]
+    steps:
+      - name: Compute lowercase owner
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: dist
+
+      - name: Aggregate checksums
+        run: cat dist/*.sha256 > dist/SHA256SUMS && rm -f dist/*.sha256
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          body: |
+            ## Container images
+
+            Multi-arch (`linux/amd64`, `linux/arm64`), pushed to GHCR:
+
+            ```
+            docker pull ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/traceflow-agent:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/traceflow-client:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/traceflow-collector:${{ github.ref_name }}
+            ```
+
+            ## Binaries
+
+            Static `linux/amd64` and `linux/arm64` tarballs are attached below; verify with `SHA256SUMS`.
