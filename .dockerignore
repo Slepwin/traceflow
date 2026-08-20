@@ -1,0 +1,8 @@
+# Build context hygiene for `docker build` (mirrors .containerignore, which is
+# podman-only). eBPF bindings are regenerated inside the builder, so keep the
+# host copies out of the context to avoid shipping stale objects.
+.git/
+bin/
+*.o
+agent/traceflow_bpfel.go
+agent/traceflow_bpfeb.go
