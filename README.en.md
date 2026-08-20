@@ -455,7 +455,7 @@ Each component ships as its own minimal image, built from `deploy/docker/Dockerf
 
 | Image | Base | Purpose |
 |-------|------|---------|
-| `traceflow-agent` | debian-slim + iproute2 | loads eBPF, answers/intercepts probes (privileged) |
+| `traceflow-agent` | debian-slim + iproute2 + OVS/OVN CLIs | loads eBPF; `--watch` on hypervisors, `--watch-vxlan` on network nodes (privileged) |
 | `traceflow-client` | debian-slim | injects marked probes |
 | `traceflow-collector` | distroless static (nonroot) | HTTP path aggregator |
 
@@ -497,44 +497,52 @@ docker pull ghcr.io/slepwin/traceflow-client:v0.1.0
 docker pull ghcr.io/slepwin/traceflow-collector:v0.1.0
 ```
 
-### Agent — on every hypervisor
+### Agent — hypervisor (compute node)
 
-The agent loads eBPF and taps host interfaces, so it must share the host network
-namespace and hold BPF + net capabilities. Simplest (privileged):
+Every hypervisor runs an agent in **`--watch`** mode (the default for a compute node): it
+discovers OVN VM taps via `ovs-vsctl` and resolves each VM's IPs from the OVN NB DB,
+attaching/detaching eBPF as VMs come and go. The image bundles the OVS + OVN client tools,
+so `--watch` works out of the box — it just needs the host network namespace, BPF + net
+capabilities, and the OVS DB socket:
+
+```bash
+docker run -d --name traceflow-agent \
+    --network host --privileged \
+    -v /run/openvswitch:/run/openvswitch \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 \
+    --watch --az az-east-1 \
+    --collector-url http://collector.host:8080 \
+    --metrics-addr :9090
+```
+
+If the OVN NB DB is remote, point the agent at it with `-e OVN_NB_DB=tcp:<central>:6641`
+(IP resolution is best-effort; without it, pass `--local-ip` explicitly). Least-privilege
+alternative — drop `--privileged` for explicit caps (`--cap-add SYS_ADMIN` on kernels <
+5.8 that lack `CAP_BPF`):
+
+```bash
+docker run -d --name traceflow-agent --network host \
+    --cap-add BPF --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_RESOURCE \
+    -v /run/openvswitch:/run/openvswitch \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 --watch --az az-east-1
+```
+
+Static mode (`--iface eth0 --local-ip 10.10.0.2`) is available too when you want to pin
+one interface and the VM IPs it answers for, with no OVS discovery.
+
+### Agent — network node (inter-AZ)
+
+The network node carries the inter-AZ VXLAN tunnels, so its agent runs **`--watch-vxlan`**:
+it follows per-tenant VXLAN netdevs via netlink and tags each observation with the device
+VNI. This mode is netlink-only — no OVS/OVN sockets needed (it is the same image as the
+compute-node agent; the OVS/OVN tools simply go unused here):
 
 ```bash
 docker run -d --name traceflow-agent \
     --network host --privileged \
     ghcr.io/slepwin/traceflow-agent:v0.1.0 \
     --watch-vxlan --az az-east-1 \
-    --collector-url http://collector.host:8080 \
-    --metrics-addr :9090
-```
-
-Least-privilege alternative (drop `--privileged` for explicit caps):
-
-```bash
-docker run -d --name traceflow-agent --network host \
-    --cap-add BPF --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_RESOURCE \
-    ghcr.io/slepwin/traceflow-agent:v0.1.0 --iface eth0 --local-ip 10.10.0.2
-```
-
-On kernels < 5.8 that lack `CAP_BPF`, use `--cap-add SYS_ADMIN` instead. Which attach
-mode works inside the slim image:
-
-| Mode | In the slim image? | Notes |
-|------|--------------------|-------|
-| `--iface NAME --local-ip …` (static) | yes | pin one interface and the VM IPs it answers for |
-| `--watch-vxlan` | yes | netlink only, no external tools needed |
-| `--watch` (OVN tap discovery) | needs OVS/OVN CLIs | shells `ovs-vsctl` / `ovn-nbctl`, which are **not** in the image |
-
-For `--watch`, expose the OVS DB socket and make the CLIs reachable (mount them from the
-host, or build a fatter agent image with `openvswitch-common` + the OVN client packages):
-
-```bash
-docker run -d --network host --privileged \
-    -v /run/openvswitch:/run/openvswitch \
-    ghcr.io/slepwin/traceflow-agent:v0.1.0 --watch --az az-east-1
+    --collector-url http://collector.host:8080
 ```
 
 ### Client — wherever you inject probes
@@ -582,18 +590,20 @@ Storage is in-memory; for production point `--collector-url` at your own ingeste
 ### How they fit together
 
 ```
- hypervisor A                  hypervisor B                  ops host
- ┌─────────────────┐           ┌─────────────────┐           ┌──────────────────────┐
- │ traceflow-agent │           │ traceflow-agent │           │ traceflow-collector  │
- │  --watch-vxlan  │           │  --watch-vxlan  │           │        :8080         │
- │  --collector-url┼── HTTP ───┼─────────────────┼── HTTP ──▶│  (group by run id)   │
- │ traceflow-client│           └─────────────────┘           └──────────────────────┘
- │  (inject probe) │
- └─────────────────┘
+ compute nodes (hypervisors)    network node                 ops host
+ ┌──────────────────────┐       ┌──────────────────────┐     ┌──────────────────────┐
+ │ traceflow-agent      │       │ traceflow-agent      │     │ traceflow-collector  │
+ │   --watch            │       │   --watch-vxlan      │     │        :8080         │
+ │ (OVN VM tap disco)   │       │ (inter-AZ VXLAN VNI) │     │ (group by run id)    │
+ └──────────┬───────────┘       └──────────┬───────────┘     └───────────▲──────────┘
+            └────────────── observations over HTTP ──────────────────────┘
+
+ traceflow-client — run ad-hoc, wherever you start a probe
 ```
 
-One agent per hypervisor (host network, privileged), one collector somewhere reachable,
-and the client run ad-hoc wherever you want to start a probe.
+One agent per hypervisor in `--watch` (host network, privileged), one agent per network
+node in `--watch-vxlan`, one collector somewhere reachable, and the client run ad-hoc
+wherever you want to start a probe.
 
 ---
 
