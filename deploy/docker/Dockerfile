@@ -53,11 +53,14 @@ RUN go generate ./... \
 	&& GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -trimpath -ldflags="-s -w" -o /out/collector ./collector
 
 ########################  agent  ########################
-# Loads eBPF, may shell out to `ip`/`ovs-vsctl` in watch mode -> needs iproute2.
+# Loads eBPF. In the default hypervisor mode (--watch) it shells out to
+# ovs-vsctl / ovn-nbctl for OVN tap discovery and VM-IP resolution, so ship the
+# OVS + OVN client tools; iproute2 provides `ip`. On a network node it runs
+# --watch-vxlan (netlink only), which needs none of these but is the same image.
 # Runs privileged (BPF + net caps); stays root.
 FROM docker.io/library/debian:bookworm-slim AS agent
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	iproute2 procps \
+	iproute2 procps openvswitch-switch ovn-common \
 	&& rm -rf /var/lib/apt/lists/*
 COPY --from=builder /out/agent /usr/local/bin/agent
 ENTRYPOINT ["/usr/local/bin/agent"]
