@@ -14,7 +14,17 @@
 BIN := bin
 IMAGE ?= traceflow:latest
 
-.PHONY: all deps generate build agent client collector test itest image image-itest clean
+# Per-component release images (deploy/docker/Dockerfile). REGISTRY/OWNER/VERSION
+# override the tag: e.g. `make images REGISTRY=ghcr.io OWNER=slepwin VERSION=v1.4.0`.
+REGISTRY  ?= ghcr.io
+OWNER     ?= slepwin
+VERSION   ?= dev
+PLATFORMS ?= linux/amd64,linux/arm64
+DOCKERFILE := deploy/docker/Dockerfile
+COMPONENTS := agent client collector
+
+.PHONY: all deps generate build agent client collector test itest image image-itest \
+	images images-push $(addprefix image-,$(COMPONENTS)) clean
 
 all: build
 
@@ -46,13 +56,30 @@ test:
 itest: build
 	./tests/run-integration.sh
 
-# Rootless container image (unit tests run inside the builder stage).
+# Rootless container image (unit tests run in the builder stage).
 image:
 	podman build -t $(IMAGE) -f Containerfile .
 
 # Run the integration suite inside the container (needs --privileged).
 image-itest: image
 	podman run --rm --privileged $(IMAGE) itest
+
+# Per-component images. `make images` builds all three locally (single-arch,
+# loaded into the engine); `make image-agent` builds just one. Uses docker
+# buildx — the same Dockerfile CI pushes multi-arch.
+images: $(addprefix image-,$(COMPONENTS))
+
+image-%:
+	docker buildx build -f $(DOCKERFILE) --target $* \
+		-t $(REGISTRY)/$(OWNER)/traceflow-$*:$(VERSION) --load .
+
+# Build and push all three multi-arch (needs `docker login $(REGISTRY)`).
+images-push:
+	@for c in $(COMPONENTS); do \
+		docker buildx build -f $(DOCKERFILE) --target $$c \
+			--platform $(PLATFORMS) \
+			-t $(REGISTRY)/$(OWNER)/traceflow-$$c:$(VERSION) --push . ; \
+	done
 
 clean:
 	rm -rf $(BIN)
