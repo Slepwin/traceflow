@@ -32,6 +32,8 @@ at the ones that carry the mark.
 - [Authentication (HMAC)](#authentication-hmac)
 - [Build](#build)
 - [Container](#container)
+- [Release images](#release-images)
+- [Running the containers](#running-the-containers)
 - [Tests](#tests)
 - [Two-AZ VXLAN lab](#two-az-vxlan-lab)
 - [OVS-DPDK / AF_XDP](#ovs-dpdk--af_xdp)
@@ -481,6 +483,117 @@ docker pull ghcr.io/slepwin/traceflow-collector:v1.4.0
 
 `ci.yml` runs the unit tests and builds all three images (no push) on every PR, so the
 release path is validated before a tag is ever cut.
+
+---
+
+## Running the containers
+
+The three images map onto the three roles. Pull them once (Podman is a drop-in — swap
+`docker` for `podman` in every command below):
+
+```bash
+docker pull ghcr.io/slepwin/traceflow-agent:v0.1.0
+docker pull ghcr.io/slepwin/traceflow-client:v0.1.0
+docker pull ghcr.io/slepwin/traceflow-collector:v0.1.0
+```
+
+### Agent — on every hypervisor
+
+The agent loads eBPF and taps host interfaces, so it must share the host network
+namespace and hold BPF + net capabilities. Simplest (privileged):
+
+```bash
+docker run -d --name traceflow-agent \
+    --network host --privileged \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 \
+    --watch-vxlan --az az-east-1 \
+    --collector-url http://collector.host:8080 \
+    --metrics-addr :9090
+```
+
+Least-privilege alternative (drop `--privileged` for explicit caps):
+
+```bash
+docker run -d --name traceflow-agent --network host \
+    --cap-add BPF --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_RESOURCE \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 --iface eth0 --local-ip 10.10.0.2
+```
+
+On kernels < 5.8 that lack `CAP_BPF`, use `--cap-add SYS_ADMIN` instead. Which attach
+mode works inside the slim image:
+
+| Mode | In the slim image? | Notes |
+|------|--------------------|-------|
+| `--iface NAME --local-ip …` (static) | yes | pin one interface and the VM IPs it answers for |
+| `--watch-vxlan` | yes | netlink only, no external tools needed |
+| `--watch` (OVN tap discovery) | needs OVS/OVN CLIs | shells `ovs-vsctl` / `ovn-nbctl`, which are **not** in the image |
+
+For `--watch`, expose the OVS DB socket and make the CLIs reachable (mount them from the
+host, or build a fatter agent image with `openvswitch-common` + the OVN client packages):
+
+```bash
+docker run -d --network host --privileged \
+    -v /run/openvswitch:/run/openvswitch \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 --watch --az az-east-1
+```
+
+### Client — wherever you inject probes
+
+Sending marked probes needs a raw socket and reach to the real network, so host
+networking + `CAP_NET_RAW`. The client is one-shot: it sends, waits for the reply (with
+`--response`), prints the result and exits — so use `--rm`.
+
+```bash
+docker run --rm --network host --cap-add NET_RAW \
+    ghcr.io/slepwin/traceflow-client:v0.1.0 \
+    icmp --dst 10.10.0.2 --response
+```
+
+All subcommands (`icmp`, `udp`, `htcp`, `tcp`, `vxlan`) and flags behave exactly as in
+[The client](#the-client) — e.g. a signed full TCP dialog:
+
+```bash
+docker run --rm --network host --cap-add NET_RAW \
+    ghcr.io/slepwin/traceflow-client:v0.1.0 \
+    tcp --dst 10.10.0.2 --dport 80 --hmac-key s3cret --response
+```
+
+### Collector — one per fleet
+
+The collector is a plain HTTP service with no privileges (it runs as a non-root user on
+distroless). Publish its port and point the agents' `--collector-url` at it:
+
+```bash
+docker run -d --name traceflow-collector \
+    -p 8080:8080 \
+    ghcr.io/slepwin/traceflow-collector:v0.1.0 --addr :8080
+```
+
+Then read the assembled paths:
+
+```bash
+curl http://collector.host:8080/paths
+curl "http://collector.host:8080/path?id=<run-uuid>"
+```
+
+Storage is in-memory; for production point `--collector-url` at your own ingester, or use
+`--otlp-endpoint` (see [OTLP export](#otlp-export-distributed-tracing)) instead.
+
+### How they fit together
+
+```
+ hypervisor A                  hypervisor B                  ops host
+ ┌─────────────────┐           ┌─────────────────┐           ┌──────────────────────┐
+ │ traceflow-agent │           │ traceflow-agent │           │ traceflow-collector  │
+ │  --watch-vxlan  │           │  --watch-vxlan  │           │        :8080         │
+ │  --collector-url┼── HTTP ───┼─────────────────┼── HTTP ──▶│  (group by run id)   │
+ │ traceflow-client│           └─────────────────┘           └──────────────────────┘
+ │  (inject probe) │
+ └─────────────────┘
+```
+
+One agent per hypervisor (host network, privileged), one collector somewhere reachable,
+and the client run ad-hoc wherever you want to start a probe.
 
 ---
 
