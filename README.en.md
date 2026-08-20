@@ -2,7 +2,7 @@
 
 > 🇷🇺 Документация на русском: **[README.md](README.md)**
 
-**eBPF path diagnostics for VXLAN overlay networks.**
+**eBPF path diagnostics for OVN overlay networks.**
 
 Traceflow answers one question that ordinary tooling cannot: *by which hosts, tunnels
 and VNIs did this packet actually travel?* It sends a specially **marked** probe and
