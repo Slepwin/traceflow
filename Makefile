@@ -1,4 +1,4 @@
-# Traceflow — build orchestration.
+# Traceflow - build orchestration.
 #
 # Prerequisites:
 #   - Go >= 1.22
@@ -46,17 +46,17 @@ client:
 collector:
 	CGO_ENABLED=0 go build -o $(BIN)/collector ./collector
 
-# Pure-logic unit tests — no root, no eBPF, no netns. Includes the agent's OVS
+# Pure-logic unit tests - no root, no eBPF, no netns. Includes the agent's OVS
 # JSON parser tests (needs generated bindings: run `make generate` first).
 test:
 	go test ./...
 
-# Integration tests — build the binaries, then run the netns/veth/VXLAN suite.
+# Integration tests - build the binaries, then run the netns/veth/VXLAN suite.
 # Needs CAP_NET_ADMIN + BPF caps; tests SKIP (not fail) when eBPF can't load.
 itest: build
 	./tests/run-integration.sh
 
-# Rootless container image (unit tests run in the builder stage).
+# Rootless container image (unit tests run inside the builder stage).
 image:
 	podman build -t $(IMAGE) -f Containerfile .
 
@@ -66,7 +66,7 @@ image-itest: image
 
 # Per-component images. `make images` builds all three locally (single-arch,
 # loaded into the engine); `make image-agent` builds just one. Uses docker
-# buildx — the same Dockerfile CI pushes multi-arch.
+# buildx - the same Dockerfile CI pushes multi-arch.
 images: $(addprefix image-,$(COMPONENTS))
 
 image-%:
