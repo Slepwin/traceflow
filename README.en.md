@@ -49,7 +49,7 @@ groups the per-hop records by run id and reconstructs the path.
  client                     hypervisor A                  hypervisor B
  ┌─────────┐   marked pkt   ┌────────────┐    overlay     ┌────────────┐
  │  client │ ──────────────▶│ agent+eBPF │ ──────────────▶│ agent+eBPF │
- └────┬───┘  DSCP62+magic  │  TC / XDP  │   VXLAN / tap  │  TC / XDP  │
+ └────┬────┘  DSCP62+magic  │  TC / XDP  │   VXLAN / tap  │  TC / XDP  │
       │ ▲                   └─────┬──────┘                └─────┬──────┘
       │ │ response                │  observations (ring buffer)  │
       │ │ (dst only)              ▼                              ▼
@@ -105,10 +105,10 @@ control block. With `--hmac-key` a 32-byte HMAC-SHA256 is appended, making the p
 
 ```
  offset  0        4                          20   21   22              30              62
-         ┌────────┬────────────────────────┬────┬────┬───────────────┬──── HMAC ─────┐
+         ┌────────┬──────────────────────────┬────┬────┬───────────────┬──── HMAC ─────┐
          │ magic  │ id  (UUIDv4, 16 bytes)    │ in │ nr │  timestamp    │  SHA-256, 32B │
          │  4 B   │                           │ 1B │ 1B │   8 B (ns)    │  (optional)   │
-         └────────┴────────────────────────┴────┴────┴───────────────┴───────────────┘
+         └────────┴──────────────────────────┴────┴────┴───────────────┴───────────────┘
            TFLO      run id, shared by all hops   │    │   send time
                                         intercept ┘    └ need_response
 ```
