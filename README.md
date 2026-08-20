@@ -50,7 +50,7 @@ OVS-мосты, VXLAN-туннели и VNI, в котором ехал кадр
  client                     hypervisor A                  hypervisor B
  ┌─────────┐   marked pkt   ┌────────────┐    overlay     ┌────────────┐
  │  client │ ──────────────▶│ agent+eBPF │ ──────────────▶│ agent+eBPF │
- └────┬───┘  DSCP62+magic  │  TC / XDP  │   VXLAN / tap  │  TC / XDP  │
+ └────┬────┘  DSCP62+magic  │  TC / XDP  │   VXLAN / tap  │  TC / XDP  │
       │ ▲                   └─────┬──────┘                └─────┬──────┘
       │ │ response                │  observations (ring buffer)  │
       │ │ (dst only)              ▼                              ▼
@@ -107,10 +107,10 @@ payload становится 62 байта.
 
 ```
  offset  0        4                          20   21   22              30              62
-         ┌────────┬────────────────────────┬────┬────┬───────────────┬──── HMAC ─────┐
+         ┌────────┬──────────────────────────┬────┬────┬───────────────┬──── HMAC ─────┐
          │ magic  │ id  (UUIDv4, 16 bytes)    │ in │ nr │  timestamp    │  SHA-256, 32B │
          │  4 B   │                           │ 1B │ 1B │   8 B (ns)    │  (optional)   │
-         └────────┴────────────────────────┴────┴────┴───────────────┴───────────────┘
+         └────────┴──────────────────────────┴────┴────┴───────────────┴───────────────┘
            TFLO      run id, shared by all hops   │    │   send time
                                         intercept ┘    └ need_response
 ```
