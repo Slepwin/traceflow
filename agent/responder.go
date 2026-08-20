@@ -307,7 +307,7 @@ func (r *responder) buildReplyL4(src, dst net.IP, proto uint8, l4 []byte, v6 boo
 		}
 		payload := l4[8:]
 		meta, err := tfmeta.Unmarshal(payload)
-		if err != nil || !meta.NeedResponse || !r.authOK(payload) {
+		if err != nil || !meta.NeedResponse || meta.Deliver || !r.authOK(payload) {
 			return nil
 		}
 		id := binary.BigEndian.Uint16(l4[4:6])
@@ -325,7 +325,7 @@ func (r *responder) buildReplyL4(src, dst net.IP, proto uint8, l4 []byte, v6 boo
 		}
 		payload := l4[8:]
 		meta, err := tfmeta.Unmarshal(payload)
-		if err != nil || !meta.NeedResponse || !r.authOK(payload) {
+		if err != nil || !meta.NeedResponse || meta.Deliver || !r.authOK(payload) {
 			return nil
 		}
 		sport := binary.BigEndian.Uint16(l4[0:2])
@@ -381,7 +381,7 @@ func (r *responder) buildTCPReply(src, dst net.IP, tcp []byte, v6 bool) []byte {
 	// known VM IP) from reflecting a SYN/ACK or FIN/ACK — closing the amplification
 	// and probing vector that would otherwise bypass --hmac-key on the TCP path.
 	meta, err := tfmeta.Unmarshal(data)
-	if err != nil || !meta.NeedResponse || !r.authOK(data) {
+	if err != nil || !meta.NeedResponse || meta.Deliver || !r.authOK(data) {
 		return nil
 	}
 
@@ -450,14 +450,15 @@ func serverISN(src, dst net.IP, sport, dport uint16) uint32 {
 	return h.Sum32()
 }
 
-// sanitize copies a payload, clears the intercept/need_response bytes (so the
-// echoed packet is observed on the return path but triggers no second response),
-// and re-signs it when HMAC auth is on (so the return-path packet stays valid).
+// sanitize copies a payload, clears the deliver/need_response bytes (so the
+// echoed packet is observed on the return path but triggers no second response
+// and is never intercepted), and re-signs it when HMAC auth is on (so the
+// return-path packet stays valid).
 func (r *responder) sanitize(p []byte) []byte {
 	out := make([]byte, len(p))
 	copy(out, p)
 	if len(out) >= tfmeta.MetaSize {
-		out[20] = 0 // intercept
+		out[20] = 0 // deliver
 		out[21] = 0 // need_response
 	}
 	if len(r.hmacKey) > 0 && len(out) >= tfmeta.SignedSize {

@@ -60,7 +60,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: client <icmp|udp|htcp|tcp|vxlan> [flags]")
-	fmt.Fprintln(os.Stderr, "  common: --dst IP(v4/v6) [--src IP] [--response] [--intercept] [--timeout 2s]")
+	fmt.Fprintln(os.Stderr, "  common: --dst IP(v4/v6) [--src IP] [--response] [--deliver] [--timeout 2s]")
 	fmt.Fprintln(os.Stderr, "  udp/htcp/tcp: --dport N [--sport N]")
 	fmt.Fprintln(os.Stderr, "  ipv6/vlan (L2 send): --iface NAME --dst-mac MAC [--vlan VID] [--src-mac MAC]")
 	fmt.Fprintln(os.Stderr, "  --as-vm: fill src IP/MAC from the OVS tap (--iface) for OVN port security")
@@ -71,16 +71,16 @@ func usage() {
 // --- flags ----------------------------------------------------------------
 
 type flags struct {
-	src, dst            string
-	innerSrc, innerDst  string
-	sport, dport, vni   int
-	vlan                int
-	iface               string
-	dstMAC, srcMAC      string
-	asVM                bool
-	hmacKey             string
-	response, intercept bool
-	timeout             time.Duration
+	src, dst           string
+	innerSrc, innerDst string
+	sport, dport, vni  int
+	vlan               int
+	iface              string
+	dstMAC, srcMAC     string
+	asVM               bool
+	hmacKey            string
+	response, deliver  bool
+	timeout            time.Duration
 }
 
 // payload returns the meta signed with the shared key (or bare if no key).
@@ -104,7 +104,7 @@ func (f *flags) parse(args []string) {
 	fs.BoolVar(&f.asVM, "as-vm", false, "resolve src IP/MAC from the OVS tap (--iface) so OVN port security passes")
 	fs.StringVar(&f.hmacKey, "hmac-key", "", "shared secret to sign the probe (must match the agent's --hmac-key)")
 	fs.BoolVar(&f.response, "response", false, "wait for a response")
-	fs.BoolVar(&f.intercept, "intercept", false, "ask agents to intercept (drop) the packet")
+	fs.BoolVar(&f.deliver, "deliver", false, "deliver the probe to the destination VM (the agent does not intercept or answer; the VM's own stack replies)")
 	fs.DurationVar(&f.timeout, "timeout", 2*time.Second, "response timeout")
 	_ = fs.Parse(args)
 	if f.dst == "" {
@@ -118,7 +118,7 @@ func (f *flags) newMeta() (tfmeta.Meta, [16]byte) {
 	id := uuid.New()
 	m := tfmeta.Meta{
 		ID:           id,
-		Intercept:    f.intercept,
+		Deliver:      f.deliver,
 		NeedResponse: f.response,
 		Timestamp:    uint64(time.Now().UnixNano()),
 	}

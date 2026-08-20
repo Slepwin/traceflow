@@ -3,18 +3,19 @@
 // to a local VM, and exports metrics.
 //
 // Two attach modes:
-//   --iface NAME   attach to a single interface (static).
-//   --watch        discover OVN VM tap ports via ovs-vsctl and attach/detach
-//                  eBPF as VMs come and go; per-tap responders answer for that
-//                  VM's addresses (resolved from OVN, best-effort).
+//
+//	--iface NAME   attach to a single interface (static).
+//	--watch        discover OVN VM tap ports via ovs-vsctl and attach/detach
+//	               eBPF as VMs come and go; per-tap responders answer for that
+//	               VM's addresses (resolved from OVN, best-effort).
 //
 // Flags:
-//   --iface-type   auto | regular | vxlan          (default auto)
-//   --allow-intercept  may drop intercepted packets on plain frames
-//   --node-id      identifier for this host (default: hostname)
-//   --respond      answer packets whose dst is a --local-ip / discovered VM IP
-//   --local-ip     comma-separated local VM IPs (static mode)
-//   --metrics-addr host:port for Prometheus /metrics + /healthz ("" = off)
+//
+//	--iface-type   auto | regular | vxlan          (default auto)
+//	--node-id      identifier for this host (default: hostname)
+//	--respond      answer packets whose dst is a --local-ip / discovered VM IP
+//	--local-ip     comma-separated local VM IPs (static mode)
+//	--metrics-addr host:port for Prometheus /metrics + /healthz ("" = off)
 package main
 
 import (
@@ -29,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 
@@ -38,16 +40,16 @@ import (
 
 // tfConfig mirrors `struct tf_config` (4 bytes) in bpf/traceflow.h.
 type tfConfig struct {
-	AllowIntercept uint8
-	IfaceType      uint8
-	_              [2]uint8
+	IfaceType  uint8
+	Respond    uint8
+	TCPRespond uint8
+	_          uint8
 }
 
 // opts bundles the resolved agent configuration.
 type opts struct {
 	ifaceName     string
 	ifType        uint8
-	allow         bool
 	nodeID        string
 	respond       bool
 	tcpRespond    bool
@@ -65,22 +67,21 @@ type opts struct {
 
 func main() {
 	var (
-		ifaceName   = flag.String("iface", "", "interface to attach to (or use --watch)")
-		ifaceType   = flag.String("iface-type", "auto", "interface type: auto | regular | vxlan")
-		allowInt    = flag.Bool("allow-intercept", false, "allow dropping packets that request interception")
-		nodeID      = flag.String("node-id", "", "node identifier (default: hostname)")
-		respond     = flag.Bool("respond", true, "reply to need_response=1 packets whose dst is a local VM IP")
-		tcpRespond  = flag.Bool("tcp-respond", true, "answer TCP probes in userspace; false lets the real VM stack reply")
-		localIPCSV  = flag.String("local-ip", "", "comma-separated local VM IPs this agent answers for (static mode)")
-		watch       = flag.Bool("watch", false, "auto-attach to OVN VM taps via ovs-vsctl and follow VM lifecycle")
-		watchInt    = flag.Duration("watch-interval", 5*time.Second, "tap re-scan interval in --watch mode")
-		watchVXLAN  = flag.Bool("watch-vxlan", false, "follow per-tenant VXLAN netdevs via netlink and tag observations with the device VNI")
-		metricsAddr = flag.String("metrics-addr", "", "host:port for Prometheus /metrics + /healthz (empty = off)")
-		hmacKey     = flag.String("hmac-key", "", "shared secret; responder rejects requests without a valid HMAC (empty = auth off)")
-		az          = flag.String("az", "", "availability zone; tagged onto every observation")
+		ifaceName    = flag.String("iface", "", "interface to attach to (or use --watch)")
+		ifaceType    = flag.String("iface-type", "auto", "interface type: auto | regular | vxlan")
+		nodeID       = flag.String("node-id", "", "node identifier (default: hostname)")
+		respond      = flag.Bool("respond", true, "reply to need_response=1 packets whose dst is a local VM IP")
+		tcpRespond   = flag.Bool("tcp-respond", true, "answer TCP probes in userspace; false lets the real VM stack reply")
+		localIPCSV   = flag.String("local-ip", "", "comma-separated local VM IPs this agent answers for (static mode)")
+		watch        = flag.Bool("watch", false, "auto-attach to OVN VM taps via ovs-vsctl and follow VM lifecycle")
+		watchInt     = flag.Duration("watch-interval", 5*time.Second, "tap re-scan interval in --watch mode")
+		watchVXLAN   = flag.Bool("watch-vxlan", false, "follow per-tenant VXLAN netdevs via netlink and tag observations with the device VNI")
+		metricsAddr  = flag.String("metrics-addr", "", "host:port for Prometheus /metrics + /healthz (empty = off)")
+		hmacKey      = flag.String("hmac-key", "", "shared secret; responder rejects requests without a valid HMAC (empty = auth off)")
+		az           = flag.String("az", "", "availability zone; tagged onto every observation")
 		collectorURL = flag.String("collector-url", "", "POST each observation as JSON to this URL (empty = stdout only)")
 		otlpEndpoint = flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint host:port; export each observation as a span (run id = trace id)")
-		xdp         = flag.Bool("xdp", false, "attach at the XDP hook (ingress-only) instead of TC — for NICs in native/AF_XDP mode")
+		xdp          = flag.Bool("xdp", false, "attach at the XDP hook (ingress-only) instead of TC — for NICs in native/AF_XDP mode")
 	)
 	flag.Parse()
 
@@ -111,16 +112,6 @@ func main() {
 		ifType = tfmeta.IfaceAuto
 	}
 
-	allow := *allowInt
-	if ifType == tfmeta.IfaceVXLAN && allow {
-		log.Printf("safety guard: forcing allow-intercept=false on vxlan interface")
-		allow = false
-	}
-	if ifType == tfmeta.IfaceAuto && allow {
-		log.Printf("auto mode: allow-intercept applies to plain frames only; " +
-			"encapsulated traffic is never dropped (kernel guard)")
-	}
-
 	localIPs, err := parseLocalIPs(*localIPCSV)
 	if err != nil {
 		log.Fatal(err)
@@ -129,7 +120,6 @@ func main() {
 	err = run(opts{
 		ifaceName:     *ifaceName,
 		ifType:        ifType,
-		allow:         allow,
 		nodeID:        *nodeID,
 		respond:       *respond,
 		tcpRespond:    *tcpRespond,
@@ -161,11 +151,20 @@ func run(o opts) error {
 	defer objs.Close()
 
 	cfg := tfConfig{IfaceType: o.ifType}
-	if o.allow {
-		cfg.AllowIntercept = 1
+	if o.respond {
+		cfg.Respond = 1
+	}
+	if o.tcpRespond {
+		cfg.TCPRespond = 1
 	}
 	if err := objs.ConfigMap.Put(uint32(0), &cfg); err != nil {
 		return fmt.Errorf("write config map: %w", err)
+	}
+
+	// Register static local VM IPs so the eBPF program intercepts probes destined
+	// here (watch mode registers per-tap IPs as taps come and go).
+	if err := addLocalIPs(objs.LocalIps, o.localIPs); err != nil {
+		return fmt.Errorf("write local_ips map: %w", err)
 	}
 
 	if o.metricsAddr != "" {
@@ -249,8 +248,8 @@ func attachStatic(objs *traceflowObjects, o opts) (func(), error) {
 	case o.respond:
 		log.Printf("observe-only: no --local-ip given, this agent never replies (transit/VTEP)")
 	}
-	log.Printf("traceflow agent up: iface=%s type=%s allow_intercept=%v node_id=%s",
-		o.ifaceName, ifaceTypeString(o.ifType), o.allow, o.nodeID)
+	log.Printf("traceflow agent up: iface=%s type=%s node_id=%s",
+		o.ifaceName, ifaceTypeString(o.ifType), o.nodeID)
 
 	return func() {
 		detach()
@@ -300,6 +299,40 @@ func parseLocalIPs(csv string) ([]net.IP, error) {
 		out = append(out, ip)
 	}
 	return out, nil
+}
+
+// ipKey16 renders an IP into the 16-byte key layout the eBPF observation uses:
+// IPv4 in the first 4 bytes (rest zero), IPv6 in all 16. This matches obs.dst_ip
+// so a local_ips lookup keyed on the inner dst hits.
+func ipKey16(ip net.IP) [16]byte {
+	var k [16]byte
+	if v4 := ip.To4(); v4 != nil {
+		copy(k[:4], v4)
+	} else {
+		copy(k[:], ip.To16())
+	}
+	return k
+}
+
+// addLocalIPs registers VM destination IPs in the local_ips map, telling the eBPF
+// program that this host is their final destination (so it intercepts probes to
+// them). Safe to call with a nil/empty slice.
+func addLocalIPs(m *ebpf.Map, ips []net.IP) error {
+	for _, ip := range ips {
+		k := ipKey16(ip)
+		if err := m.Put(k, uint8(1)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// delLocalIPs removes VM destination IPs from the local_ips map.
+func delLocalIPs(m *ebpf.Map, ips []net.IP) {
+	for _, ip := range ips {
+		k := ipKey16(ip)
+		_ = m.Delete(k)
+	}
 }
 
 func ifaceTypeString(t uint8) string {

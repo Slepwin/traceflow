@@ -159,6 +159,27 @@ func TestHMACGateResponder(t *testing.T) {
 	}
 }
 
+// TestDeliverNotAnswered checks that a probe asking for VM delivery (Deliver=1)
+// is not answered by the responder — the VM's own stack replies instead.
+func TestDeliverNotAnswered(t *testing.T) {
+	r := newTestResponder(true)
+	r.localIPs = map[[16]byte]bool{key16(vmIP): true}
+	deliver := tfmeta.Meta{NeedResponse: true, Deliver: true}.Marshal()
+
+	// ICMP: NeedResponse set but Deliver=1 -> no reply.
+	icmp := pkt.ICMP(pkt.ICMPEchoRequest, 1, 1, deliver)
+	l3 := pkt.IPv4(tfmeta.ToS, tfmeta.TTLMax, pkt.ProtoICMP, clientIP, vmIP, icmp)
+	if got := r.buildReply(pkt.EtherTypeIPv4, l3); got != nil {
+		t.Fatal("deliver probe must not be answered (the VM stack replies)")
+	}
+
+	// TCP: a SYN with Deliver=1 -> no SYN/ACK.
+	syn := pkt.TCP(clientIP, vmIP, 40000, 80, 0x2000, 0, pkt.FlagSYN, deliver)
+	if got := r.buildTCPReply(clientIP, vmIP, syn, false); got != nil {
+		t.Fatal("deliver SYN must not be answered")
+	}
+}
+
 func TestTCPRespondDisabled(t *testing.T) {
 	r := newTestResponder(false)
 	syn := pkt.TCP(clientIP, vmIP, 40000, 80, 0x2000, 0, pkt.FlagSYN, meta())
