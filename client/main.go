@@ -1,13 +1,13 @@
-// Command client sends marked traceflow probes. In a real system this is part
-// of the Health Monitor. Every probe carries DSCP=62, TTL=255 and a
+// Command client sends marked traceflow probes — the diagnostic driver that a
+// monitoring system triggers. Every probe carries DSCP=62, TTL=255 and a
 // traceflow_meta control block, so agents along the path observe it.
 //
 // Sub-commands:
 //
 //	icmp   ICMP echo request        (--response waits for echo reply)
 //	udp    UDP datagram             (--response waits for a UDP reply)
-//	tcp    TCP handshake            (SYN -> SYN/ACK -> ACK)
-//	ptcp   TCP handshake + data + FIN (full dialog)
+//	htcp   TCP handshake            (SYN -> SYN/ACK -> ACK)
+//	tcp    TCP handshake + data + FIN (full dialog)
 //	vxlan  VXLAN-encapsulated marked ICMP with a given VNI
 //
 // Packets are sent with an AF_INET raw socket (IP_HDRINCL), so we set the ToS,
@@ -47,9 +47,9 @@ func main() {
 		runICMP(fs)
 	case "udp":
 		runUDP(fs)
-	case "tcp":
+	case "htcp":
 		runTCP(fs, false)
-	case "ptcp":
+	case "tcp":
 		runTCP(fs, true)
 	case "vxlan":
 		runVXLAN(fs)
@@ -59,9 +59,9 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: client <icmp|udp|tcp|ptcp|vxlan> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: client <icmp|udp|htcp|tcp|vxlan> [flags]")
 	fmt.Fprintln(os.Stderr, "  common: --dst IP(v4/v6) [--src IP] [--response] [--intercept] [--timeout 2s]")
-	fmt.Fprintln(os.Stderr, "  udp/tcp/ptcp: --dport N [--sport N]")
+	fmt.Fprintln(os.Stderr, "  udp/htcp/tcp: --dport N [--sport N]")
 	fmt.Fprintln(os.Stderr, "  ipv6/vlan (L2 send): --iface NAME --dst-mac MAC [--vlan VID] [--src-mac MAC]")
 	fmt.Fprintln(os.Stderr, "  --as-vm: fill src IP/MAC from the OVS tap (--iface) for OVN port security")
 	fmt.Fprintln(os.Stderr, "  vxlan: --dst VTEP --inner-src IP --inner-dst IP --vni N")
@@ -145,6 +145,7 @@ func runICMP(f *flags) {
 	meta, id := f.newMeta()
 
 	sn := startSniffer(f)
+	defer sn.close()
 	l3, v6 := icmpL3(src, dst, 0x1234, 1, f.payload(meta))
 	emit(f, dst, l3, v6)
 	log.Printf("sent marked ICMP%s %s -> %s (id=%s)", v6tag(v6), src, dst, uuid.UUID(id))
@@ -165,6 +166,7 @@ func runUDP(f *flags) {
 	meta, id := f.newMeta()
 
 	sn := startSniffer(f)
+	defer sn.close()
 	l3, v6 := udpL3(src, dst, uint16(f.sport), uint16(f.dport), f.payload(meta))
 	emit(f, dst, l3, v6)
 	log.Printf("sent marked UDP%s %s:%d -> %s:%d (id=%s)", v6tag(v6), src, f.sport, dst, f.dport, uuid.UUID(id))
@@ -176,7 +178,7 @@ func runUDP(f *flags) {
 	}
 }
 
-// --- TCP / pTCP -----------------------------------------------------------
+// --- TCP (htcp: handshake only; tcp: full dialog with data + FIN) ----------
 
 func runTCP(f *flags, withData bool) {
 	if f.dport == 0 {
@@ -188,6 +190,7 @@ func runTCP(f *flags, withData bool) {
 	const clientISN = 0x2000
 
 	sn := startSniffer(f)
+	defer sn.close()
 	meta, id := f.newMeta()
 	v6 := isV6(dst)
 
@@ -259,6 +262,7 @@ func runVXLAN(f *flags) {
 	meta, id := f.newMeta()
 
 	sn := startSniffer(f)
+	defer sn.close()
 
 	// Inner marked ICMP/ICMPv6 echo request (outer is always IPv4/UDP).
 	innerIP, innerV6 := icmpL3(innerSrc, innerDst, 0x1234, 1, f.payload(meta))

@@ -47,6 +47,13 @@ func startSniffer(f *flags) *sniffer {
 	return &sniffer{fd: fd}
 }
 
+// close releases the AF_PACKET socket.
+func (s *sniffer) close() {
+	if s != nil {
+		unix.Close(s.fd)
+	}
+}
+
 func htons(v uint16) uint16 { return (v<<8)&0xff00 | v>>8 }
 
 // next blocks for the next decodable marked packet, up to `deadline`.
@@ -79,7 +86,7 @@ func parseMarked(frame []byte) (capture, bool) {
 	if ol4, isUDP := outerUDP(et, l3); isUDP && len(ol4) >= 8 &&
 		binary.BigEndian.Uint16(ol4[2:4]) == tfmeta.VXLANPort {
 		vxl := ol4[8:]
-		if len(vxl) < 8 {
+		if len(vxl) < 8 || vxl[0]&0x08 == 0 { // I flag: only a set VNI is valid VXLAN
 			return c, false
 		}
 		c.vni = binary.BigEndian.Uint32(vxl[4:8]) >> 8
@@ -94,13 +101,13 @@ func parseMarked(frame []byte) (capture, bool) {
 	switch et {
 	case pkt.EtherTypeIPv4:
 		ip, rest, ok := ipv4(l3)
-		if !ok || ip.tos != tfmeta.ToS { // level-1 filter
+		if !ok || ip.tos&0xFC != tfmeta.ToS { // level-1 filter
 			return c, false
 		}
 		c.srcIP, c.proto, l4 = ip.src.String(), ip.proto, rest
 	case pkt.EtherTypeIPv6:
 		ip, rest, ok := ipv6(l3)
-		if !ok || ip.tos != tfmeta.ToS {
+		if !ok || ip.tos&0xFC != tfmeta.ToS {
 			return c, false
 		}
 		c.srcIP, c.proto, l4 = ip.src.String(), ip.nextHdr, rest

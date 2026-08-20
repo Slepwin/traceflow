@@ -48,23 +48,28 @@ func TestTCPHandshakeSequence(t *testing.T) {
 		t.Fatalf("SYN/ACK seq=%#x ack=%#x, want %#x/%#x", seq, ack, isn, clientISN+1)
 	}
 
-	// data -> PSH/ACK, our seq = isn+1, ack = clientISN+1+len(data).
+	// data -> PSH/ACK, ack = clientISN+1+len(data). Our seq advances past the
+	// SYN(1) + the payload we echoed on the SYN/ACK (len(meta())), so it does not
+	// overlap the SYN/ACK's own sequence space.
 	// meta must lead the payload (magic at offset 0), label follows.
+	wantDataSeq := isn + 1 + uint32(len(meta()))
 	data := append(meta(), []byte("PING")...)
-	psh := pkt.TCP(clientIP, vmIP, sport, dport, clientISN+1, isn+1, pkt.FlagPSH|pkt.FlagACK, data)
+	psh := pkt.TCP(clientIP, vmIP, sport, dport, clientISN+1, wantDataSeq, pkt.FlagPSH|pkt.FlagACK, data)
 	fl, seq, ack = replyTCP(t, r.buildTCPReply(clientIP, vmIP, psh, false))
 	if fl != pkt.FlagPSH|pkt.FlagACK {
 		t.Fatalf("data reply flags = %#x, want PSH|ACK", fl)
 	}
-	if seq != isn+1 {
-		t.Fatalf("data reply seq = %#x, want %#x", seq, isn+1)
+	if seq != wantDataSeq {
+		t.Fatalf("data reply seq = %#x, want %#x", seq, wantDataSeq)
 	}
 	if ack != clientISN+1+uint32(len(data)) {
 		t.Fatalf("data reply ack = %#x, want %#x", ack, clientISN+1+uint32(len(data)))
 	}
 
-	// FIN -> FIN/ACK, and the flow is forgotten
-	fin := pkt.TCP(clientIP, vmIP, sport, dport, clientISN+1, isn+1, pkt.FlagFIN|pkt.FlagACK, nil)
+	// FIN -> FIN/ACK, and the flow is forgotten. The real client signs every
+	// segment, so the FIN carries meta too (a bare FIN is not answered — see
+	// TestTCPRejectsUnauthenticated).
+	fin := pkt.TCP(clientIP, vmIP, sport, dport, clientISN+1, isn+1, pkt.FlagFIN|pkt.FlagACK, meta())
 	fl, _, _ = replyTCP(t, r.buildTCPReply(clientIP, vmIP, fin, false))
 	if fl != pkt.FlagFIN|pkt.FlagACK {
 		t.Fatalf("FIN reply flags = %#x, want FIN|ACK", fl)
@@ -74,11 +79,51 @@ func TestTCPHandshakeSequence(t *testing.T) {
 	}
 }
 
+// TestTCPRejectsUnauthenticated locks in the fix for the TCP reflection vector:
+// the responder must not answer a TCP segment that lacks a valid, need_response,
+// authenticated meta — otherwise a bare or unsigned SYN reflects a SYN/ACK and
+// bypasses --hmac-key.
+func TestTCPRejectsUnauthenticated(t *testing.T) {
+	const sport, dport = uint16(40000), uint16(80)
+
+	// A bare SYN with no payload must not be answered.
+	r := newTestResponder(true)
+	bareSYN := pkt.TCP(clientIP, vmIP, sport, dport, 0x2000, 0, pkt.FlagSYN, nil)
+	if got := r.buildTCPReply(clientIP, vmIP, bareSYN, false); got != nil {
+		t.Fatalf("bare SYN must not be answered, got %d bytes", len(got))
+	}
+	if len(r.flows) != 0 {
+		t.Fatalf("bare SYN must not create flow state: %d entries", len(r.flows))
+	}
+
+	// A SYN whose meta does not ask for a response must not be answered.
+	rNo := newTestResponder(true)
+	noResp := pkt.TCP(clientIP, vmIP, sport, dport, 0x2000, 0, pkt.FlagSYN,
+		tfmeta.Meta{NeedResponse: false}.Marshal())
+	if got := rNo.buildTCPReply(clientIP, vmIP, noResp, false); got != nil {
+		t.Fatalf("SYN without need_response must not be answered, got %d bytes", len(got))
+	}
+
+	// Under an HMAC key, an unsigned SYN must not be answered; a signed one is.
+	rKey := newTestResponder(true)
+	rKey.hmacKey = []byte("k")
+	unsigned := pkt.TCP(clientIP, vmIP, sport, dport, 0x2000, 0, pkt.FlagSYN,
+		tfmeta.Meta{NeedResponse: true}.Marshal())
+	if got := rKey.buildTCPReply(clientIP, vmIP, unsigned, false); got != nil {
+		t.Fatalf("unsigned SYN under a key must not be answered, got %d bytes", len(got))
+	}
+	signed := pkt.TCP(clientIP, vmIP, sport, dport, 0x2000, 0, pkt.FlagSYN,
+		tfmeta.Meta{NeedResponse: true}.Signed([]byte("k")))
+	if got := rKey.buildTCPReply(clientIP, vmIP, signed, false); got == nil {
+		t.Fatal("signed need_response SYN under a key must be answered")
+	}
+}
+
 func TestVLANFromAuxData(t *testing.T) {
 	// tpacket_auxdata with TP_STATUS_VLAN_VALID and vlan_tci carrying VID 42.
 	d := make([]byte, 20)
-	binary.NativeEndian.PutUint32(d[0:4], 0x10)  // status: VLAN_VALID
-	binary.NativeEndian.PutUint16(d[16:18], 42)  // vlan_tci -> VID 42
+	binary.NativeEndian.PutUint32(d[0:4], 0x10) // status: VLAN_VALID
+	binary.NativeEndian.PutUint16(d[16:18], 42) // vlan_tci -> VID 42
 	if v, ok := vlanFromAuxData(d); !ok || v != 42 {
 		t.Fatalf("vlanFromAuxData = %d,%v, want 42,true", v, ok)
 	}

@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"log"
 	"net"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -108,6 +109,9 @@ func (r *responder) Loop() {
 			if err == unix.EBADF || err == unix.EINTR {
 				return
 			}
+			// Unexpected error (e.g. the interface going down): back off so a
+			// sticky condition doesn't spin this goroutine at 100% CPU.
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		auxVlan := auxVLAN(oob[:oobn])
@@ -232,7 +236,7 @@ func (r *responder) handleVXLAN(frame []byte, auxVlan uint16) {
 		return
 	}
 	vxl := ol4[8:]
-	if len(vxl) < 8 {
+	if len(vxl) < 8 || vxl[0]&0x08 == 0 { // I flag: only a set VNI is valid VXLAN
 		return
 	}
 	vni := binary.BigEndian.Uint32(vxl[4:8]) >> 8
@@ -274,13 +278,13 @@ func (r *responder) buildReply(etherType uint16, l3 []byte) []byte {
 	switch etherType {
 	case pkt.EtherTypeIPv4:
 		ip, rest, ok := parseIPv4(l3)
-		if !ok || ip.tos != tfmeta.ToS { // level-1 filter
+		if !ok || ip.tos&0xFC != tfmeta.ToS { // level-1 filter
 			return nil
 		}
 		src, dst, proto, l4 = ip.src, ip.dst, ip.proto, rest
 	case pkt.EtherTypeIPv6:
 		ip, rest, ok := parseIPv6(l3)
-		if !ok || ip.tos != tfmeta.ToS {
+		if !ok || ip.tos&0xFC != tfmeta.ToS {
 			return nil
 		}
 		src, dst, proto, l4, v6 = ip.src, ip.dst, ip.nextHdr, rest, true
@@ -361,17 +365,26 @@ func (r *responder) buildTCPReply(src, dst net.IP, tcp []byte, v6 bool) []byte {
 	}
 	flags := tcp[13]
 	data := tcp[doff:]
+	key := flowKey(src, dst, sport, dport)
 
-	if len(data) >= tfmeta.MetaSize {
-		if _, err := tfmeta.Unmarshal(data); err != nil {
-			return nil
-		}
-		if !r.authOK(data) {
-			return nil
-		}
+	// A RST only tears down our flow state; it elicits no reply, so it needs no
+	// auth and emits nothing.
+	if flags&pkt.FlagRST != 0 {
+		delete(r.flows, key)
+		return nil
 	}
 
-	key := flowKey(src, dst, sport, dport)
+	// Every TCP segment that would elicit a reply must carry a valid, authenticated
+	// meta that asks for a response — the same gate the ICMP/UDP paths apply. The
+	// real client signs every segment (SYN, ACK, data, FIN), so this never rejects
+	// a genuine probe, but it stops a bare or unsigned SYN/FIN (ToS=0xF8 aimed at a
+	// known VM IP) from reflecting a SYN/ACK or FIN/ACK — closing the amplification
+	// and probing vector that would otherwise bypass --hmac-key on the TCP path.
+	meta, err := tfmeta.Unmarshal(data)
+	if err != nil || !meta.NeedResponse || !r.authOK(data) {
+		return nil
+	}
+
 	mk := func(seq, ack uint32, fl uint8, payload []byte) []byte {
 		if v6 {
 			seg := pkt.TCP6(dst, src, dport, sport, seq, ack, fl, payload)
@@ -382,19 +395,19 @@ func (r *responder) buildTCPReply(src, dst net.IP, tcp []byte, v6 bool) []byte {
 	}
 
 	switch {
-	case flags&pkt.FlagRST != 0:
-		delete(r.flows, key)
-		return nil
-
 	case flags&pkt.FlagSYN != 0 && flags&pkt.FlagACK == 0:
 		isn := serverISN(src, dst, sport, dport)
 		if len(r.flows) > 4096 { // crude cap against leaks
 			r.flows = map[string]*tcpFlow{}
 		}
-		r.flows[key] = &tcpFlow{serverNext: isn + 1} // SYN consumes 1
 		// Echo the meta so the SYN/ACK is itself marked (observable on the
-		// return path) and the client can correlate it by run id.
-		return mk(isn, clientSeq+1, pkt.FlagSYN|pkt.FlagACK, r.sanitize(data))
+		// return path) and the client can correlate it by run id. The SYN flag
+		// consumes one sequence number and the echoed payload consumes len(echo)
+		// more, so our next sequence advances past both — otherwise the later
+		// data reply would overlap the SYN/ACK's own sequence space.
+		echo := r.sanitize(data)
+		r.flows[key] = &tcpFlow{serverNext: isn + 1 + uint32(len(echo))}
+		return mk(isn, clientSeq+1, pkt.FlagSYN|pkt.FlagACK, echo)
 
 	case flags&pkt.FlagFIN != 0:
 		f := r.flows[key]
