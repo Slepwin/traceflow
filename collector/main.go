@@ -20,6 +20,11 @@ import (
 	"github.com/traceflow/traceflow/internal/observation"
 )
 
+// maxObsPerRun bounds how many observations a single run id may retain, so one
+// chatty or malicious run cannot grow memory without limit. A real path has a
+// handful of hops; this is generous headroom for retries and both directions.
+const maxObsPerRun = 4096
+
 type store struct {
 	mu    sync.Mutex
 	runs  map[string][]observation.Observation
@@ -41,6 +46,9 @@ func (s *store) add(o observation.Observation) {
 			s.order = s.order[1:]
 			delete(s.runs, old)
 		}
+	}
+	if len(s.runs[o.ID]) >= maxObsPerRun {
+		return // per-run cap reached: drop further observations for this run
 	}
 	s.runs[o.ID] = append(s.runs[o.ID], o)
 }

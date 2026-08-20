@@ -16,9 +16,10 @@
  *      transit traffic is never dropped.
  *
  * All packet access is direct (data/data_end) with explicit bounds checks so the
- * verifier is happy. Numeric fields written to `observation` are host byte order
- * so the Go side can decode with LittleEndian on x86-64. IPs are ntohl'd to host
- * order; ports are ntohs'd; the magic is compared in network order.
+ * verifier is happy. Numeric scalar fields written to `observation` (ports, vlan,
+ * vni, timestamps) are host byte order so the Go side decodes with LittleEndian on
+ * x86-64. IP addresses are copied as raw network-order bytes; ports are ntohs'd to
+ * host order; the magic is compared in network order.
  */
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
@@ -394,6 +395,8 @@ static __always_inline int parse_vxlan(void *data, void *data_end,
 
 	struct vxlanhdr_ *vx = (void *)(oudp + 1);
 	if ((void *)(vx + 1) > data_end)
+		return 0;
+	if ((bpf_ntohl(vx->flags) & 0x08000000) == 0) /* VXLAN I flag: VNI valid */
 		return 0;
 	__u32 vni = bpf_ntohl(vx->vni_reserved) >> 8;
 
