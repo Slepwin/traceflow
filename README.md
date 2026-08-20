@@ -34,7 +34,7 @@ OVS-мосты, VXLAN-туннели и VNI, в котором ехал кадр
 - [Сборка](#сборка)
 - [Контейнер](#контейнер)
 - [Тесты](#тесты)
-- [Стенд 2 AZ через VXLAN (без veth)](#стенд-2-az-через-vxlan-без-veth)
+- [Стенд 2 AZ через VXLAN](#стенд-2-az-через-vxlan)
 - [OVS-DPDK / AF_XDP](#ovs-dpdk--af_xdp)
 - [Заметки и ограничения](#заметки-и-ограничения)
 
@@ -264,7 +264,7 @@ agent/                 eBPF loader, ring reader, responder, watchers, metrics, e
 client/                marked-probe sender + AF_PACKET reply sniffer
 collector/             HTTP collector: group observations by run id, assemble paths
 scripts/               demo-netns.sh, lab-2az-vxlan.sh
-tests/                 Go unit tests + integration suite (netns / veth / VXLAN / OVN)
+tests/                 Go unit tests + integration suite (netns / VXLAN / OVN)
 ```
 
 ---
@@ -461,15 +461,15 @@ make itest   # интеграционная suite (нужен root; см. ниж
 | `test_hmac.sh` | подписанная проба отвечается, неподписанная отклоняется (по метрикам) |
 | `test_clsact.sh` | clsact/cls_bpf fallback (`TRACEFLOW_FORCE_CLSACT=1`) |
 | `test_xdp.sh` | путь attach через XDP (`--xdp`): программа на netdev, observation на ingress |
-| `test_vxlan_2az.sh` | два шасси / две AZ, соединённые VXLAN, **без veth** (нужен OVS) |
+| `test_vxlan_2az.sh` | два шасси / две AZ, соединённые VXLAN (нужен OVS) |
 
 ---
 
-## Стенд 2 AZ через VXLAN (без veth)
+## Стенд 2 AZ через VXLAN
 
-Два шасси в стиле OVN в двух AZ, соединённых VXLAN, **без единого veth**: межшассийный
-underlay построен на **OVS internal-портах** (реальные kernel-netdev'ы), а inter-AZ
-overlay — это **kernel VXLAN-устройство**.
+Два шасси в стиле OVN в двух AZ, соединённых VXLAN: межшассийный underlay построен на
+**OVS internal-портах** (реальные kernel-netdev'ы), а inter-AZ overlay — это **kernel
+VXLAN-устройство**.
 
 ```
  host: OVS br-underlay  (normal L2 switch)
@@ -496,7 +496,7 @@ sudo ./scripts/lab-2az-vxlan.sh down
 
 *Почему internal-порты:* OVS internal-порт — это реальный kernel-netdev, остающийся
 прикреплённым к OVS-datapath даже после переноса в netns, так что два netns-«шасси»
-соединяются через host-datapath без единого veth. (`ovs-sandbox` / `make sandbox`
+соединяются через host-datapath. (`ovs-sandbox` / `make sandbox`
 использует **dummy** datapath, где реальные пакеты через kernel-netdev'ы не идут, поэтому
 eBPF/TC их не видят — нужен настоящий kernel datapath.)
 
