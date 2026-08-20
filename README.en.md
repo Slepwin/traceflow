@@ -429,7 +429,7 @@ Runtime: Linux (TCX needs ≥ 6.6; older kernels use the clsact fallback), run a
 with `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_NET_RAW`.
 
 Make targets: `deps`, `generate`, `build`, `agent`, `client`, `collector`, `test`,
-`itest`, `image`, `image-itest`, `clean`.
+`itest`, `image`, `image-itest`, `images`, `images-push`, `clean`.
 
 ---
 
@@ -443,6 +443,44 @@ podman run --rm --privileged traceflow itest # integration suite (rootful for re
 Rootless podman can build the image and run the unit tests, but loading eBPF and
 `ip netns exec` need real BPF/net capabilities — the integration tests SKIP (they do not
 fail) when those are unavailable. Run rootful, or on the host.
+
+---
+
+## Release images
+
+Each component ships as its own minimal image, built from `deploy/docker/Dockerfile`
+(a shared cross-compiling builder stage + one lean final stage per component):
+
+| Image | Base | Purpose |
+|-------|------|---------|
+| `traceflow-agent` | debian-slim + iproute2 | loads eBPF, answers/intercepts probes (privileged) |
+| `traceflow-client` | debian-slim | injects marked probes |
+| `traceflow-collector` | distroless static (nonroot) | HTTP path aggregator |
+
+Build locally (single-arch, loaded into the engine):
+
+```bash
+make images                      # all three, tagged :dev
+make image-agent VERSION=v1.4.0  # just one
+```
+
+Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which builds each image
+**multi-arch (`linux/amd64` + `linux/arm64`)** and pushes to GHCR, then cuts a GitHub
+Release with auto notes and static binary tarballs:
+
+```bash
+git tag v1.4.0 && git push origin v1.4.0
+```
+
+```bash
+# tagged :X.Y.Z, :X.Y, and (for non-prerelease tags) :latest
+docker pull ghcr.io/slepwin/traceflow-agent:v1.4.0
+docker pull ghcr.io/slepwin/traceflow-client:v1.4.0
+docker pull ghcr.io/slepwin/traceflow-collector:v1.4.0
+```
+
+`ci.yml` runs the unit tests and builds all three images (no push) on every PR, so the
+release path is validated before a tag is ever cut.
 
 ---
 
