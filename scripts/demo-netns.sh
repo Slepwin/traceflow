@@ -27,9 +27,9 @@ up() {
 }
 
 agent() {
-  echo "starting agent in ns2 on veth2 (regular, allow-intercept, answers for local 10.10.0.2)"
+  echo "starting agent in ns2 on veth2 (regular, answers for and intercepts local 10.10.0.2)"
   ip netns exec ns2 "$BIN_DIR/agent" --iface veth2 --iface-type regular \
-    --allow-intercept --node-id ns2 --local-ip 10.10.0.2
+    --node-id ns2 --local-ip 10.10.0.2
 }
 
 probe() {

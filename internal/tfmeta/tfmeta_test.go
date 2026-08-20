@@ -41,7 +41,7 @@ func TestTimestampLittleEndian(t *testing.T) {
 func TestRoundTrip(t *testing.T) {
 	in := Meta{
 		ID:           [16]byte{0x3f, 0x2b, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
-		Intercept:    true,
+		Deliver:      true,
 		NeedResponse: true,
 		Timestamp:    1_700_000_000_123_456_789,
 	}
@@ -55,14 +55,14 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestFlagBytes(t *testing.T) {
-	// intercept at offset 20, need_response at offset 21.
-	b := Meta{Intercept: true, NeedResponse: false}.Marshal()
+	// deliver at offset 20, need_response at offset 21.
+	b := Meta{Deliver: true, NeedResponse: false}.Marshal()
 	if b[20] != 1 || b[21] != 0 {
-		t.Fatalf("intercept/need_response bytes = %d/%d, want 1/0", b[20], b[21])
+		t.Fatalf("deliver/need_response bytes = %d/%d, want 1/0", b[20], b[21])
 	}
-	b = Meta{Intercept: false, NeedResponse: true}.Marshal()
+	b = Meta{Deliver: false, NeedResponse: true}.Marshal()
 	if b[20] != 0 || b[21] != 1 {
-		t.Fatalf("intercept/need_response bytes = %d/%d, want 0/1", b[20], b[21])
+		t.Fatalf("deliver/need_response bytes = %d/%d, want 0/1", b[20], b[21])
 	}
 }
 

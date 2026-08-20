@@ -29,7 +29,7 @@ const (
 	VXLANPort = 4789
 
 	// MetaSize is the packed size of traceflow_meta on the wire.
-	// 4 (magic) + 16 (id) + 1 (intercept) + 1 (need_response) + 8 (timestamp).
+	// 4 (magic) + 16 (id) + 1 (deliver) + 1 (need_response) + 8 (timestamp).
 	MetaSize = 30
 
 	// AuthSize is the HMAC-SHA256 appended after the meta when a key is used.
@@ -48,8 +48,11 @@ const (
 
 // Meta is the control block placed right after the transport header.
 type Meta struct {
-	ID           [16]byte
-	Intercept    bool
+	ID [16]byte
+	// Deliver=false (default) asks agents to intercept the original at the
+	// destination and answer it themselves; Deliver=true delivers the original
+	// to the VM so its own stack replies.
+	Deliver      bool
 	NeedResponse bool
 	Timestamp    uint64 // unix nanoseconds
 }
@@ -66,7 +69,7 @@ func (m Meta) Marshal() []byte {
 	buf := make([]byte, MetaSize)
 	binary.BigEndian.PutUint32(buf[0:4], Magic) // "TFLO"
 	copy(buf[4:20], m.ID[:])
-	if m.Intercept {
+	if m.Deliver {
 		buf[20] = 1
 	}
 	if m.NeedResponse {
@@ -116,7 +119,7 @@ func Unmarshal(b []byte) (Meta, error) {
 		return m, fmt.Errorf("bad magic: not a traceflow packet")
 	}
 	copy(m.ID[:], b[4:20])
-	m.Intercept = b[20] == 1
+	m.Deliver = b[20] == 1
 	m.NeedResponse = b[21] == 1
 	m.Timestamp = binary.LittleEndian.Uint64(b[22:30])
 	return m, nil

@@ -6,7 +6,7 @@
  *   - traceflow_meta : the control block carried inside the packet payload,
  *                      right after the transport (ICMP/UDP/TCP) header.
  *   - observation    : one record pushed to the ring buffer per marked packet.
- *   - tf_config      : the per-attachment config (allow_intercept, iface type).
+ *   - tf_config      : the per-attachment config (iface type, respond flags).
  *
  * Field order in `observation` is deliberately largest-to-smallest so that the
  * natural C alignment matches the Go struct read on the userspace side without
@@ -55,14 +55,15 @@
  *
  *   magic         4  0x54464C4F confirmation that this is our packet
  *   id           16  UUIDv4 — run identifier, shared across all hops
- *   intercept     1  1 = intercept the packet (do not forward)
+ *   deliver       1  0 = agent intercepts at the destination (default);
+ *                    1 = deliver the original to the VM, let its stack answer
  *   need_response 1  1 = reply back to the sender
  *   timestamp     8  send time in unix nanoseconds (for latency)
  */
 struct traceflow_meta {
 	__u32 magic;
 	__u8  id[16];
-	__u8  intercept;
+	__u8  deliver;
 	__u8  need_response;
 	__u64 timestamp;
 } __attribute__((packed));
@@ -98,9 +99,10 @@ struct observation {
 
 /* Per-attachment configuration, stored in an array map at index 0. */
 struct tf_config {
-	__u8 allow_intercept; /* 1 = may drop packets that ask to be intercepted */
-	__u8 iface_type;      /* TF_IFACE_REGULAR or TF_IFACE_VXLAN              */
-	__u8 _pad[2];
+	__u8 iface_type;   /* TF_IFACE_REGULAR / TF_IFACE_VXLAN / TF_IFACE_AUTO  */
+	__u8 respond;      /* 1 = this agent answers marked probes locally       */
+	__u8 tcp_respond;  /* 1 = answer TCP in userspace (else defer to the VM) */
+	__u8 _pad;
 };
 
 #endif /* __TRACEFLOW_H__ */
