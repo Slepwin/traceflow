@@ -432,7 +432,7 @@ make build       # → bin/{agent,client,collector}
 от root или с `CAP_BPF` + `CAP_NET_ADMIN` + `CAP_NET_RAW`.
 
 Таргеты make: `deps`, `generate`, `build`, `agent`, `client`, `collector`, `test`,
-`itest`, `image`, `image-itest`, `clean`.
+`itest`, `image`, `image-itest`, `images`, `images-push`, `clean`.
 
 ---
 
@@ -446,6 +446,45 @@ podman run --rm --privileged traceflow itest # integration suite (rootful for re
 Rootless podman может собрать образ и прогнать unit-тесты, но загрузка eBPF и
 `ip netns exec` требуют настоящих BPF/net-прав — интеграционные тесты SKIP (не падают),
 когда их нет. Запускайте rootful или на хосте.
+
+---
+
+## Релизные образы
+
+Каждый компонент поставляется отдельным минимальным образом, собираемым из
+`deploy/docker/Dockerfile` (общая кросс-компилирующая builder-стадия + по одной лёгкой
+финальной стадии на компонент):
+
+| Образ | База | Назначение |
+|-------|------|------------|
+| `traceflow-agent` | debian-slim + iproute2 | загружает eBPF, отвечает/перехватывает пробы (privileged) |
+| `traceflow-client` | debian-slim | внедряет маркированные пробы |
+| `traceflow-collector` | distroless static (nonroot) | HTTP-агрегатор путей |
+
+Локальная сборка (одна арх., загружается в движок):
+
+```bash
+make images                      # все три, тег :dev
+make image-agent VERSION=v1.4.0  # только один
+```
+
+Пуш тега `vX.Y.Z` запускает `.github/workflows/release.yml`: каждый образ собирается
+**мультиарх (`linux/amd64` + `linux/arm64`)** и пушится в GHCR, затем создаётся GitHub
+Release с авто-заметками и тарболами статических бинарников:
+
+```bash
+git tag v1.4.0 && git push origin v1.4.0
+```
+
+```bash
+# теги :X.Y.Z, :X.Y и (для не-prerelease тегов) :latest
+docker pull ghcr.io/slepwin/traceflow-agent:v1.4.0
+docker pull ghcr.io/slepwin/traceflow-client:v1.4.0
+docker pull ghcr.io/slepwin/traceflow-collector:v1.4.0
+```
+
+`ci.yml` на каждый PR прогоняет unit-тесты и собирает все три образа (без пуша), так что
+релизный путь проверяется ещё до того, как поставлен тег.
 
 ---
 
