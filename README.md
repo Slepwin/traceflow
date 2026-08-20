@@ -459,7 +459,7 @@ Rootless podman может собрать образ и прогнать unit-т
 
 | Образ | База | Назначение |
 |-------|------|------------|
-| `traceflow-agent` | debian-slim + iproute2 | загружает eBPF, отвечает/перехватывает пробы (privileged) |
+| `traceflow-agent` | debian-slim + iproute2 + OVS/OVN CLI | загружает eBPF; `--watch` на гипервизорах, `--watch-vxlan` на сетевых нодах (privileged) |
 | `traceflow-client` | debian-slim | внедряет маркированные пробы |
 | `traceflow-collector` | distroless static (nonroot) | HTTP-агрегатор путей |
 
@@ -501,44 +501,51 @@ docker pull ghcr.io/slepwin/traceflow-client:v0.1.0
 docker pull ghcr.io/slepwin/traceflow-collector:v0.1.0
 ```
 
-### Агент — на каждом гипервизоре
+### Агент — гипервизор (compute-нода)
 
-Агент грузит eBPF и снимает трафик с интерфейсов хоста, поэтому ему нужны сетевое
-пространство имён хоста и BPF + net-права. Проще всего (privileged):
+Каждый гипервизор запускает агента в режиме **`--watch`** (по умолчанию для compute-ноды):
+он находит OVN VM-tap'ы через `ovs-vsctl` и резолвит IP каждой VM из OVN NB DB,
+attach'ит/detach'ит eBPF по мере появления/исчезновения VM. Образ содержит OVS + OVN
+клиентские утилиты, поэтому `--watch` работает из коробки — нужны лишь сетевое
+пространство имён хоста, BPF + net-права и сокет OVS DB:
+
+```bash
+docker run -d --name traceflow-agent \
+    --network host --privileged \
+    -v /run/openvswitch:/run/openvswitch \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 \
+    --watch --az az-east-1 \
+    --collector-url http://collector.host:8080 \
+    --metrics-addr :9090
+```
+
+Если OVN NB DB удалённая, укажите её через `-e OVN_NB_DB=tcp:<central>:6641` (резолв IP —
+best-effort; без него передавайте `--local-ip` явно). Вариант с минимумом прав — вместо
+`--privileged` явные capabilities (`--cap-add SYS_ADMIN` на ядрах < 5.8 без `CAP_BPF`):
+
+```bash
+docker run -d --name traceflow-agent --network host \
+    --cap-add BPF --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_RESOURCE \
+    -v /run/openvswitch:/run/openvswitch \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 --watch --az az-east-1
+```
+
+Статический режим (`--iface eth0 --local-ip 10.10.0.2`) тоже доступен, когда нужно
+зафиксировать один интерфейс и IP VM, за которые отвечаете, без OVS-обнаружения.
+
+### Агент — сетевая нода (меж-AZ)
+
+Сетевая нода несёт меж-AZ VXLAN-туннели, поэтому её агент работает в режиме
+**`--watch-vxlan`**: следит за per-tenant VXLAN-netdev'ами через netlink и тегирует
+каждую observation VNI устройства. Режим только netlink — сокеты OVS/OVN не нужны (это
+тот же образ, что и на compute-ноде; OVS/OVN-утилиты здесь просто не используются):
 
 ```bash
 docker run -d --name traceflow-agent \
     --network host --privileged \
     ghcr.io/slepwin/traceflow-agent:v0.1.0 \
     --watch-vxlan --az az-east-1 \
-    --collector-url http://collector.host:8080 \
-    --metrics-addr :9090
-```
-
-Вариант с минимумом прав (вместо `--privileged` — явные capabilities):
-
-```bash
-docker run -d --name traceflow-agent --network host \
-    --cap-add BPF --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_RESOURCE \
-    ghcr.io/slepwin/traceflow-agent:v0.1.0 --iface eth0 --local-ip 10.10.0.2
-```
-
-На ядрах < 5.8 без `CAP_BPF` используйте `--cap-add SYS_ADMIN`. Какой режим attach
-работает внутри slim-образа:
-
-| Режим | В slim-образе? | Примечание |
-|-------|----------------|------------|
-| `--iface NAME --local-ip …` (статический) | да | фиксируете один интерфейс и IP VM, за которые отвечаете |
-| `--watch-vxlan` | да | только netlink, внешних утилит не нужно |
-| `--watch` (обнаружение OVN-tap'ов) | нужны OVS/OVN CLI | вызывает `ovs-vsctl` / `ovn-nbctl`, которых **нет** в образе |
-
-Для `--watch` пробросьте сокет OVS DB и сделайте CLI доступными (примонтируйте их с
-хоста или соберите более полный образ агента с `openvswitch-common` + OVN-клиентами):
-
-```bash
-docker run -d --network host --privileged \
-    -v /run/openvswitch:/run/openvswitch \
-    ghcr.io/slepwin/traceflow-agent:v0.1.0 --watch --az az-east-1
+    --collector-url http://collector.host:8080
 ```
 
 ### Клиент — там, откуда внедряете пробы
@@ -586,18 +593,20 @@ curl "http://collector.host:8080/path?id=<run-uuid>"
 ### Как это связано вместе
 
 ```
- гипервизор A                  гипервизор B                  ops-хост
- ┌─────────────────┐           ┌─────────────────┐           ┌──────────────────────┐
- │ traceflow-agent │           │ traceflow-agent │           │ traceflow-collector  │
- │  --watch-vxlan  │           │  --watch-vxlan  │           │        :8080         │
- │  --collector-url┼── HTTP ───┼─────────────────┼── HTTP ──▶│  (группа по run id)  │
- │ traceflow-client│           └─────────────────┘           └──────────────────────┘
- │  (внедрить пробу)│
- └─────────────────┘
+ compute-ноды (гипервизоры)     сетевая нода                 ops-хост
+ ┌──────────────────────┐       ┌──────────────────────┐     ┌──────────────────────┐
+ │ traceflow-agent      │       │ traceflow-agent      │     │ traceflow-collector  │
+ │   --watch            │       │   --watch-vxlan      │     │        :8080         │
+ │ (OVN VM tap disco)   │       │ (меж-AZ VXLAN VNI)   │     │ (группа по run id)   │
+ └──────────┬───────────┘       └──────────┬───────────┘     └───────────▲──────────┘
+            └────────────── observations по HTTP ─────────────────────────┘
+
+ traceflow-client — запускается разово там, откуда начинаете пробу
 ```
 
-По одному агенту на гипервизор (сеть хоста, privileged), один коллектор в доступном
-месте, а клиент запускается разово там, откуда хотите начать пробу.
+По одному агенту на гипервизор в `--watch` (сеть хоста, privileged), по одному на сетевую
+ноду в `--watch-vxlan`, один коллектор в доступном месте, а клиент запускается разово
+там, откуда хотите начать пробу.
 
 ---
 
