@@ -11,8 +11,8 @@
 # vni=100, iface_type=VXLAN, protocol=ICMP. We run the agent once per mode to
 # prove the hybrid (auto) detects VXLAN exactly like the explicit setting.
 #
-# It also checks the structural guard: even with --allow-intercept, an
-# encapsulated packet asking to be intercepted is FORWARDED, never dropped.
+# It also checks the structural guard: even when the inner dst is local and the
+# probe wants a response, a VXLAN-encapsulated packet is FORWARDED, never dropped.
 
 source "$(dirname "$0")/lib.sh"
 
@@ -33,24 +33,25 @@ run_case() {
 	info "VXLAN case: agent iface-type=$mode"
 	setup_underlay
 
-	# allow-intercept on purpose: the kernel guard must still refuse to drop
-	# encapsulated traffic.
-	run_agent b veth-b "$mode" "hv-$mode" --allow-intercept
+	# --local-ip = inner dst on purpose: this makes the packet a drop candidate
+	# (local dst + need_response), so only the VXLAN structural guard keeps it
+	# forwarded.
+	run_agent b veth-b "$mode" "hv-$mode" --local-ip "$INNER_D"
 	local idx=$RA
 
-	# Marked VXLAN ICMP that ALSO requests interception + a response.
+	# Marked VXLAN ICMP that requests a response (so it is a drop candidate).
 	nsx a "$CLIENT" vxlan --dst "$UNDER_B" \
 		--inner-src "$INNER_S" --inner-dst "$INNER_D" \
-		--vni "$VNI" --intercept --response --timeout 2s || true
+		--vni "$VNI" --response --timeout 2s || true
 
 	assert_obs "$idx" \
 		".vni==$VNI and .iface_type==\"VXLAN\" and .protocol==\"ICMP\" and .src_ip==\"$INNER_S\" and .dst_ip==\"$INNER_D\"" \
 		"agent observed VNI=$VNI inner ICMP ($INNER_S -> $INNER_D)"
 
-	# Structural guard: encapsulated packet is never intercepted.
+	# Structural guard: an encapsulated packet is never intercepted.
 	assert_obs "$idx" \
 		".vni==$VNI and .action==\"FORWARDED\"" \
-		"encapsulated packet FORWARDED despite --intercept + --allow-intercept (kernel guard)"
+		"encapsulated packet FORWARDED despite local dst + need_response (VXLAN guard)"
 
 	# Per-case teardown (keep the shared work dir for the next case).
 	stop_agents
