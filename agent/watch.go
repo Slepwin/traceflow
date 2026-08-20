@@ -15,6 +15,7 @@ import (
 type tapAttachment struct {
 	detach func()
 	resp   *responder
+	ips    []net.IP // registered in the local_ips map; removed on detach
 }
 
 type tapManager struct {
@@ -75,6 +76,13 @@ func (m *tapManager) attachLocked(p ovs.Port) error {
 		} else {
 			go r.Loop()
 			att.resp = r
+			// Register the VM's IPs so the eBPF program intercepts probes to
+			// them (only now that a responder is ready to answer).
+			if err := addLocalIPs(m.objs.LocalIps, p.IPs); err != nil {
+				log.Printf("watch: register local IPs for %s: %v", p.Name, err)
+			} else {
+				att.ips = p.IPs
+			}
 		}
 	}
 	m.attached[p.Name] = att
@@ -92,6 +100,9 @@ func (m *tapManager) detachLocked(name string) {
 	}
 	if att.resp != nil {
 		att.resp.Close()
+	}
+	if len(att.ips) > 0 {
+		delLocalIPs(m.objs.LocalIps, att.ips)
 	}
 	delete(m.attached, name)
 	log.Printf("watch: detached tap %s", name)

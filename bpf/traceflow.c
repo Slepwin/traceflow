@@ -11,9 +11,10 @@
  *   4. Parse the transport header (ICMP/UDP/TCP) to reach the payload.
  *   5. LEVEL-2 FILTER: check the "TFLO" magic in traceflow_meta.
  *   6. Emit an observation to the ring buffer.
- *   7. If the packet asks to be intercepted AND this attachment allows it,
- *      drop it (TC_ACT_SHOT). Tunnel ports load with allow_intercept=false, so
- *      transit traffic is never dropped.
+ *   7. If this agent will answer the probe itself (need_response set, the inner
+ *      dst is a local VM, not encapsulated, deliver=0), drop the original
+ *      (TC_ACT_SHOT) so the VM's own stack does not also reply. Transit and
+ *      source hops keep the inner dst out of local_ips, so they only observe.
  *
  * All packet access is direct (data/data_end) with explicit bounds checks so the
  * verifier is happy. Numeric scalar fields written to `observation` (ports, vlan,
@@ -30,6 +31,10 @@
 /* TC action codes (from linux/pkt_cls.h, redefined to stay header-light). */
 #define TC_ACT_OK   0
 #define TC_ACT_SHOT 2
+
+/* Bits packed into the meta-flags value threaded up from parse_l4_and_meta. */
+#define TF_MF_DELIVER       0x01
+#define TF_MF_NEED_RESPONSE 0x02
 
 /* EtherTypes. */
 #define ETH_P_IP     0x0800
@@ -143,6 +148,20 @@ struct {
 	__type(value, __u32); /* VNI     */
 } iface_vni SEC(".maps");
 
+/*
+ * local_ips holds this host's local VM destination addresses, 16 raw bytes each
+ * (IPv4 in the first 4, IPv6 in all 16 — matching observation.dst_ip). The agent
+ * populates it from --local-ip and the tap watcher. handle() drops a marked probe
+ * only when the inner dst is in this set, i.e. when THIS host is the packet's
+ * final destination — never on a transit or source hop.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__uint(key_size, 16);
+	__uint(value_size, 1);
+} local_ips SEC(".maps");
+
 /* ---- helpers ---- */
 
 static __always_inline struct tf_config *get_config(void)
@@ -158,13 +177,20 @@ static __always_inline void stat_incr(__u32 idx)
 		(*c)++; /* per-CPU: no atomic needed */
 }
 
+/* dst_is_local reports whether the inner destination is one of this host's local
+ * VM addresses — i.e. whether this node is the packet's final destination. */
+static __always_inline int dst_is_local(struct observation *obs)
+{
+	return bpf_map_lookup_elem(&local_ips, obs->dst_ip) != 0;
+}
+
 /*
  * parse_l4_and_meta — from `l4` (start of the transport header) run the level-2
  * magic filter and, on a hit, fill obs ports/flags/protocol/meta. ICMP and
  * ICMPv6 share an 8-byte echo header. Returns 1 on a confirmed marked packet.
  */
 static __always_inline int parse_l4_and_meta(void *l4, void *data_end, __u8 proto,
-					     struct observation *obs, __u8 *want_drop)
+					     struct observation *obs, __u8 *mflags)
 {
 	void *payload = 0;
 	__u16 sport = 0, dport = 0;
@@ -210,7 +236,8 @@ static __always_inline int parse_l4_and_meta(void *l4, void *data_end, __u8 prot
 	obs->dst_port = dport;
 	obs->tcp_flags = tcp_flags;
 	obs->protocol = proto;
-	*want_drop = meta->intercept;
+	*mflags = (meta->deliver ? TF_MF_DELIVER : 0) |
+		  (meta->need_response ? TF_MF_NEED_RESPONSE : 0);
 	return 1;
 }
 
@@ -220,7 +247,7 @@ static __always_inline int parse_l4_and_meta(void *l4, void *data_end, __u8 prot
  * cannot bleed into a v4 hit during AUTO fallback.
  */
 static __always_inline int parse_ipv4(void *l3, void *data_end,
-				      struct observation *obs, __u8 *want_drop)
+				      struct observation *obs, __u8 *mflags)
 {
 	struct iphdr_ *ip = l3;
 	if ((void *)(ip + 1) > data_end)
@@ -242,7 +269,7 @@ static __always_inline int parse_ipv4(void *l3, void *data_end,
 	__builtin_memset(obs->dst_ip, 0, 16);
 	__builtin_memcpy(obs->dst_ip, &ip->daddr, 4);
 	obs->hop = (__u8)(TF_TTL_MAX - ip->ttl);
-	return parse_l4_and_meta(l4, data_end, ip->protocol, obs, want_drop);
+	return parse_l4_and_meta(l4, data_end, ip->protocol, obs, mflags);
 }
 
 /*
@@ -251,7 +278,7 @@ static __always_inline int parse_ipv4(void *l3, void *data_end,
  * transport protocol directly.
  */
 static __always_inline int parse_ipv6(void *l3, void *data_end,
-				      struct observation *obs, __u8 *want_drop)
+				      struct observation *obs, __u8 *mflags)
 {
 	struct ipv6hdr_ *ip6 = l3;
 	if ((void *)(ip6 + 1) > data_end)
@@ -300,7 +327,7 @@ static __always_inline int parse_ipv6(void *l3, void *data_end,
 			break;
 		}
 	}
-	return parse_l4_and_meta(cur, data_end, nexthdr, obs, want_drop);
+	return parse_l4_and_meta(cur, data_end, nexthdr, obs, mflags);
 }
 
 /*
@@ -338,12 +365,12 @@ static __always_inline int parse_l2(void *data, void *data_end,
 
 /* dispatch an L3 pointer to the v4 or v6 parser by (network-order) ethertype. */
 static __always_inline int parse_l3(void *l3, void *data_end, __u16 ethertype,
-				    struct observation *obs, __u8 *want_drop)
+				    struct observation *obs, __u8 *mflags)
 {
 	if (ethertype == bpf_htons(ETH_P_IP))
-		return parse_ipv4(l3, data_end, obs, want_drop);
+		return parse_ipv4(l3, data_end, obs, mflags);
 	if (ethertype == bpf_htons(ETH_P_IPV6))
-		return parse_ipv6(l3, data_end, obs, want_drop);
+		return parse_ipv6(l3, data_end, obs, mflags);
 	return 0;
 }
 
@@ -359,7 +386,7 @@ static __always_inline int parse_l3(void *l3, void *data_end, __u16 ethertype,
  * on the underlay). The VID written to obs is the inner (tenant) tag.
  */
 static __always_inline int parse_vxlan(void *data, void *data_end,
-				       struct observation *obs, __u8 *want_drop)
+				       struct observation *obs, __u8 *mflags)
 {
 	__u16 oetype, ovid;
 	void *ol3;
@@ -408,7 +435,7 @@ static __always_inline int parse_vxlan(void *data, void *data_end,
 	obs->iface_type = TF_IFACE_VXLAN;
 	obs->vni = vni;
 	obs->vlan_id = ivid;
-	return parse_l3(il3, data_end, ietype, obs, want_drop);
+	return parse_l3(il3, data_end, ietype, obs, mflags);
 }
 
 /*
@@ -418,7 +445,7 @@ static __always_inline int parse_vxlan(void *data, void *data_end,
  * and we fall back to the offloaded value.
  */
 static __always_inline int parse_regular(void *data, void *data_end,
-					 struct observation *obs, __u8 *want_drop,
+					 struct observation *obs, __u8 *mflags,
 					 __u16 skb_vlan)
 {
 	__u16 etype, vid;
@@ -431,7 +458,7 @@ static __always_inline int parse_regular(void *data, void *data_end,
 	obs->iface_type = TF_IFACE_REGULAR;
 	obs->vni = 0;
 	obs->vlan_id = vid;
-	return parse_l3(l3, data_end, etype, obs, want_drop);
+	return parse_l3(l3, data_end, etype, obs, mflags);
 }
 
 static __always_inline int handle(struct __sk_buff *skb, __u8 direction)
@@ -454,7 +481,7 @@ static __always_inline int handle(struct __sk_buff *skb, __u8 direction)
 		skb_vlan = (__u16)(skb->vlan_tci & 0x0FFF);
 
 	__u8 mode = cfg->iface_type;
-	__u8 want_drop = 0;
+	__u8 mflags = 0;
 	int matched = 0;
 
 	/*
@@ -466,9 +493,9 @@ static __always_inline int handle(struct __sk_buff *skb, __u8 direction)
 	 * the outer header is not UDP/4789, so it costs a couple of extra loads.
 	 */
 	if (mode == TF_IFACE_VXLAN || mode == TF_IFACE_AUTO)
-		matched = parse_vxlan(data, data_end, &obs, &want_drop);
+		matched = parse_vxlan(data, data_end, &obs, &mflags);
 	if (!matched && (mode == TF_IFACE_REGULAR || mode == TF_IFACE_AUTO))
-		matched = parse_regular(data, data_end, &obs, &want_drop, skb_vlan);
+		matched = parse_regular(data, data_end, &obs, &mflags, skb_vlan);
 	if (!matched)
 		return TC_ACT_OK;
 
@@ -499,14 +526,21 @@ static __always_inline int handle(struct __sk_buff *skb, __u8 direction)
 	}
 
 	/*
-	 * Safety guard — two independent conditions must both hold to drop:
-	 *   1. this attachment is configured to allow interception, and
-	 *   2. the packet was NOT VXLAN-encapsulated.
-	 * (2) is structural: even if loaded with allow_intercept=true in AUTO
-	 * mode, transit (encapsulated) traffic is never dropped, only observed.
+	 * Interception — drop the original only when THIS agent will answer it, so
+	 * the VM's own stack does not reply too (no double reply). All must hold:
+	 *   - need_response is set (the probe wants an answer);
+	 *   - deliver is clear (the sender did not ask for VM delivery);
+	 *   - the inner dst is a local VM (local_ips) — we are the destination, so
+	 *     transit/source hops never drop, keeping the trace intact;
+	 *   - the frame is not VXLAN-encapsulated (structural transit guard);
+	 *   - this agent responds, and for TCP answers in userspace.
+	 * The AF_PACKET responder taps ingress before the TC hook, so it still sees
+	 * (and answers) the packet even though the original is dropped here.
 	 */
-	__u8 do_drop = want_drop && cfg->allow_intercept &&
-		       obs.iface_type != TF_IFACE_VXLAN;
+	__u8 do_drop = (mflags & TF_MF_NEED_RESPONSE) && !(mflags & TF_MF_DELIVER) &&
+		       dst_is_local(&obs) && obs.iface_type != TF_IFACE_VXLAN &&
+		       cfg->respond &&
+		       (obs.protocol != TF_PROTO_TCP || cfg->tcp_respond);
 	obs.action = do_drop ? TF_ACT_INTERCEPTED : TF_ACT_FORWARDED;
 	obs.capture_ns = bpf_ktime_get_ns();
 
@@ -558,13 +592,13 @@ int traceflow_xdp(struct xdp_md *ctx)
 	obs.ifindex = ctx->ingress_ifindex;
 
 	__u8 mode = cfg->iface_type;
-	__u8 want_drop = 0;
+	__u8 mflags = 0;
 	int matched = 0;
 
 	if (mode == TF_IFACE_VXLAN || mode == TF_IFACE_AUTO)
-		matched = parse_vxlan(data, data_end, &obs, &want_drop);
+		matched = parse_vxlan(data, data_end, &obs, &mflags);
 	if (!matched && (mode == TF_IFACE_REGULAR || mode == TF_IFACE_AUTO))
-		matched = parse_regular(data, data_end, &obs, &want_drop, 0);
+		matched = parse_regular(data, data_end, &obs, &mflags, 0);
 	if (!matched)
 		return XDP_PASS;
 
@@ -577,8 +611,10 @@ int traceflow_xdp(struct xdp_md *ctx)
 		}
 	}
 
-	__u8 do_drop = want_drop && cfg->allow_intercept &&
-		       obs.iface_type != TF_IFACE_VXLAN;
+	__u8 do_drop = (mflags & TF_MF_NEED_RESPONSE) && !(mflags & TF_MF_DELIVER) &&
+		       dst_is_local(&obs) && obs.iface_type != TF_IFACE_VXLAN &&
+		       cfg->respond &&
+		       (obs.protocol != TF_PROTO_TCP || cfg->tcp_respond);
 	obs.action = do_drop ? TF_ACT_INTERCEPTED : TF_ACT_FORWARDED;
 	obs.capture_ns = bpf_ktime_get_ns();
 
