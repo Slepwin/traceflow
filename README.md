@@ -33,6 +33,8 @@ OVS-мосты, VXLAN-туннели и VNI, в котором ехал кадр
 - [Аутентификация (HMAC)](#аутентификация-hmac)
 - [Сборка](#сборка)
 - [Контейнер](#контейнер)
+- [Релизные образы](#релизные-образы)
+- [Запуск контейнеров](#запуск-контейнеров)
 - [Тесты](#тесты)
 - [Стенд 2 AZ через VXLAN](#стенд-2-az-через-vxlan)
 - [OVS-DPDK / AF_XDP](#ovs-dpdk--af_xdp)
@@ -485,6 +487,117 @@ docker pull ghcr.io/slepwin/traceflow-collector:v1.4.0
 
 `ci.yml` на каждый PR прогоняет unit-тесты и собирает все три образа (без пуша), так что
 релизный путь проверяется ещё до того, как поставлен тег.
+
+---
+
+## Запуск контейнеров
+
+Три образа соответствуют трём ролям. Скачайте их один раз (Podman — drop-in-замена:
+подставьте `podman` вместо `docker` в любой команде ниже):
+
+```bash
+docker pull ghcr.io/slepwin/traceflow-agent:v0.1.0
+docker pull ghcr.io/slepwin/traceflow-client:v0.1.0
+docker pull ghcr.io/slepwin/traceflow-collector:v0.1.0
+```
+
+### Агент — на каждом гипервизоре
+
+Агент грузит eBPF и снимает трафик с интерфейсов хоста, поэтому ему нужны сетевое
+пространство имён хоста и BPF + net-права. Проще всего (privileged):
+
+```bash
+docker run -d --name traceflow-agent \
+    --network host --privileged \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 \
+    --watch-vxlan --az az-east-1 \
+    --collector-url http://collector.host:8080 \
+    --metrics-addr :9090
+```
+
+Вариант с минимумом прав (вместо `--privileged` — явные capabilities):
+
+```bash
+docker run -d --name traceflow-agent --network host \
+    --cap-add BPF --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_RESOURCE \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 --iface eth0 --local-ip 10.10.0.2
+```
+
+На ядрах < 5.8 без `CAP_BPF` используйте `--cap-add SYS_ADMIN`. Какой режим attach
+работает внутри slim-образа:
+
+| Режим | В slim-образе? | Примечание |
+|-------|----------------|------------|
+| `--iface NAME --local-ip …` (статический) | да | фиксируете один интерфейс и IP VM, за которые отвечаете |
+| `--watch-vxlan` | да | только netlink, внешних утилит не нужно |
+| `--watch` (обнаружение OVN-tap'ов) | нужны OVS/OVN CLI | вызывает `ovs-vsctl` / `ovn-nbctl`, которых **нет** в образе |
+
+Для `--watch` пробросьте сокет OVS DB и сделайте CLI доступными (примонтируйте их с
+хоста или соберите более полный образ агента с `openvswitch-common` + OVN-клиентами):
+
+```bash
+docker run -d --network host --privileged \
+    -v /run/openvswitch:/run/openvswitch \
+    ghcr.io/slepwin/traceflow-agent:v0.1.0 --watch --az az-east-1
+```
+
+### Клиент — там, откуда внедряете пробы
+
+Отправка маркированных проб требует raw-сокета и доступа к реальной сети, поэтому — сеть
+хоста + `CAP_NET_RAW`. Клиент одноразовый: отправляет, ждёт ответ (при `--response`),
+печатает результат и выходит — так что используйте `--rm`.
+
+```bash
+docker run --rm --network host --cap-add NET_RAW \
+    ghcr.io/slepwin/traceflow-client:v0.1.0 \
+    icmp --dst 10.10.0.2 --response
+```
+
+Все подкоманды (`icmp`, `udp`, `htcp`, `tcp`, `vxlan`) и флаги работают ровно как в
+разделе [Клиент](#клиент) — например, подписанный полный TCP-диалог:
+
+```bash
+docker run --rm --network host --cap-add NET_RAW \
+    ghcr.io/slepwin/traceflow-client:v0.1.0 \
+    tcp --dst 10.10.0.2 --dport 80 --hmac-key s3cret --response
+```
+
+### Коллектор — один на весь парк
+
+Коллектор — обычный HTTP-сервис без привилегий (работает под non-root пользователем на
+distroless). Опубликуйте порт и направьте на него `--collector-url` агентов:
+
+```bash
+docker run -d --name traceflow-collector \
+    -p 8080:8080 \
+    ghcr.io/slepwin/traceflow-collector:v0.1.0 --addr :8080
+```
+
+Затем читайте собранные пути:
+
+```bash
+curl http://collector.host:8080/paths
+curl "http://collector.host:8080/path?id=<run-uuid>"
+```
+
+Хранилище — in-memory; для продакшена направьте `--collector-url` на свой ingester или
+используйте `--otlp-endpoint` (см. [OTLP-экспорт](#otlp-экспорт-distributed-tracing)).
+
+### Как это связано вместе
+
+```
+ гипервизор A                  гипервизор B                  ops-хост
+ ┌─────────────────┐           ┌─────────────────┐           ┌──────────────────────┐
+ │ traceflow-agent │           │ traceflow-agent │           │ traceflow-collector  │
+ │  --watch-vxlan  │           │  --watch-vxlan  │           │        :8080         │
+ │  --collector-url┼── HTTP ───┼─────────────────┼── HTTP ──▶│  (группа по run id)  │
+ │ traceflow-client│           └─────────────────┘           └──────────────────────┘
+ │  (внедрить пробу)│
+ └─────────────────┘
+```
+
+По одному агенту на гипервизор (сеть хоста, privileged), один коллектор в доступном
+месте, а клиент запускается разово там, откуда хотите начать пробу.
 
 ---
 
