@@ -38,7 +38,8 @@ jobs:
       # Lowercase the owner - GHCR repositories must be lowercase, but
       # github.repository_owner preserves the original case (e.g. "Slepwin").
       - name: Compute lowercase owner
-        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+        id: owner
+        run: echo "lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       # QEMU is needed because the arm64 runtime stages run `apt-get` under
       # emulation. The Go build itself is cross-compiled natively (BUILDPLATFORM).
@@ -56,7 +57,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/traceflow-${{ matrix.component }}
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/traceflow-${{ matrix.component }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -138,7 +139,8 @@ jobs:
     needs: [images, binaries]
     steps:
       - name: Compute lowercase owner
-        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+        id: owner
+        run: echo "lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
@@ -163,9 +165,9 @@ jobs:
             Multi-arch (`linux/amd64`, `linux/arm64`), pushed to GHCR:
 
             ```
-            docker pull ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/traceflow-agent:${{ github.ref_name }}
-            docker pull ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/traceflow-client:${{ github.ref_name }}
-            docker pull ${{ env.REGISTRY }}/${{ env.OWNER_LC }}/traceflow-collector:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/traceflow-agent:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/traceflow-client:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/traceflow-collector:${{ github.ref_name }}
             ```
 
             ## Binaries
