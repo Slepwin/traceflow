@@ -161,8 +161,8 @@ func l4Checksum6(nextHdr uint8, src, dst net.IP, segment []byte) uint16 {
 // IPv6 assembles an IPv6 header in front of `payload`. tc carries DSCP<<2.
 func IPv6(tc uint8, hopLimit uint8, nextHdr uint8, src, dst net.IP, payload []byte) []byte {
 	b := make([]byte, 40+len(payload))
-	b[0] = 0x60 | (tc >> 4)  // version 6 + high nibble of traffic class
-	b[1] = (tc << 4) & 0xF0  // low nibble of traffic class + flow label (0)
+	b[0] = 0x60 | (tc >> 4) // version 6 + high nibble of traffic class
+	b[1] = (tc << 4) & 0xF0 // low nibble of traffic class + flow label (0)
 	binary.BigEndian.PutUint16(b[4:6], uint16(len(payload)))
 	b[6] = nextHdr
 	b[7] = hopLimit

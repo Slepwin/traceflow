@@ -63,29 +63,29 @@ type Raw struct {
 
 // Observation is the enriched record printed by the agent.
 type Observation struct {
-	ID        string `json:"id"`
-	NodeID    string `json:"node_id"`
-	Hop       uint8  `json:"hop"`
-	Direction string `json:"direction"`
-	VNI       uint32 `json:"vni"`
-	VLAN      uint16 `json:"vlan,omitempty"`
-	Action    string `json:"action"`
-	Protocol  string `json:"protocol"`
-	IPVersion uint8  `json:"ip_version"`
-	IfIndex   uint32 `json:"ifindex,omitempty"`
-	Iface     string `json:"iface,omitempty"`          // interface name for ifindex
+	ID            string `json:"id"`
+	NodeID        string `json:"node_id"`
+	Hop           uint8  `json:"hop"`
+	Direction     string `json:"direction"`
+	VNI           uint32 `json:"vni"`
+	VLAN          uint16 `json:"vlan,omitempty"`
+	Action        string `json:"action"`
+	Protocol      string `json:"protocol"`
+	IPVersion     uint8  `json:"ip_version"`
+	IfIndex       uint32 `json:"ifindex,omitempty"`
+	Iface         string `json:"iface,omitempty"`          // interface name for ifindex
 	LogicalSwitch string `json:"logical_switch,omitempty"` // OVN, filled by agent
 	AZ            string `json:"az,omitempty"`             // availability zone, filled by agent
-	SrcIP     string `json:"src_ip"`
-	DstIP     string `json:"dst_ip"`
-	SrcPort   uint16 `json:"src_port,omitempty"`
-	DstPort   uint16 `json:"dst_port,omitempty"`
-	TCPFlags  string `json:"tcp_flags,omitempty"`
-	IfaceType string `json:"iface_type"`
-	Timestamp string `json:"timestamp"`      // capture wall-clock (agent)
-	CaptureNS uint64 `json:"capture_ns"`     // kernel monotonic capture time
-	LatencyNS int64  `json:"latency_ns"`     // clamped >= 0
-	ClockSkew bool   `json:"clock_skew,omitempty"` // true when raw latency < 0
+	SrcIP         string `json:"src_ip"`
+	DstIP         string `json:"dst_ip"`
+	SrcPort       uint16 `json:"src_port,omitempty"`
+	DstPort       uint16 `json:"dst_port,omitempty"`
+	TCPFlags      string `json:"tcp_flags,omitempty"`
+	IfaceType     string `json:"iface_type"`
+	Timestamp     string `json:"timestamp"`            // capture wall-clock (agent)
+	CaptureNS     uint64 `json:"capture_ns"`           // kernel monotonic capture time
+	LatencyNS     int64  `json:"latency_ns"`           // clamped >= 0
+	ClockSkew     bool   `json:"clock_skew,omitempty"` // true when raw latency < 0
 }
 
 // Parse decodes a ring-buffer record into Raw.
