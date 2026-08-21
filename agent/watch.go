@@ -19,19 +19,20 @@ type tapAttachment struct {
 }
 
 type tapManager struct {
-	objs       *traceflowObjects
-	ifType     uint8
-	respond    bool
-	tcpRespond bool
-	hmacKey    []byte
-	xdp        bool
-	mu         sync.Mutex
-	attached   map[string]*tapAttachment
+	objs        *traceflowObjects
+	ifType      uint8
+	respond     bool
+	tcpRespond  bool
+	hmacKey     []byte
+	xdp         bool
+	xdpTCEgress bool
+	mu          sync.Mutex
+	attached    map[string]*tapAttachment
 }
 
-func newTapManager(objs *traceflowObjects, ifType uint8, respond, tcpRespond bool, hmacKey []byte, xdp bool) *tapManager {
+func newTapManager(objs *traceflowObjects, ifType uint8, respond, tcpRespond bool, hmacKey []byte, xdp, xdpTCEgress bool) *tapManager {
 	return &tapManager{
-		objs: objs, ifType: ifType, respond: respond, tcpRespond: tcpRespond, hmacKey: hmacKey, xdp: xdp,
+		objs: objs, ifType: ifType, respond: respond, tcpRespond: tcpRespond, hmacKey: hmacKey, xdp: xdp, xdpTCEgress: xdpTCEgress,
 		attached: map[string]*tapAttachment{},
 	}
 }
@@ -64,7 +65,7 @@ func (m *tapManager) attachLocked(p ovs.Port) error {
 	if err != nil {
 		return err
 	}
-	detach, err := attachIface(m.objs, iface.Index, m.xdp)
+	detach, err := attachIface(m.objs, iface.Index, m.xdp, m.xdpTCEgress)
 	if err != nil {
 		return err
 	}

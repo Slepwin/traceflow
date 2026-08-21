@@ -16,6 +16,9 @@
 //	--respond      answer packets whose dst is a --local-ip / discovered VM IP
 //	--local-ip     comma-separated local VM IPs (static mode)
 //	--metrics-addr host:port for Prometheus /metrics + /healthz ("" = off)
+//	--xdp          attach at the XDP hook (ingress-only) instead of TC
+//	--xdp-tc-egress with --xdp: also attach the TC egress program, so
+//	               stack-transmitted traffic is observed too
 package main
 
 import (
@@ -63,6 +66,7 @@ type opts struct {
 	collectorURL  string
 	otlpEndpoint  string
 	xdp           bool
+	xdpTCEgress   bool
 }
 
 func main() {
@@ -82,11 +86,15 @@ func main() {
 		collectorURL = flag.String("collector-url", "", "POST each observation as JSON to this URL (empty = stdout only)")
 		otlpEndpoint = flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint host:port; export each observation as a span (run id = trace id)")
 		xdp          = flag.Bool("xdp", false, "attach at the XDP hook (ingress-only) instead of TC — for NICs in native/AF_XDP mode")
+		xdpTCEgress  = flag.Bool("xdp-tc-egress", false, "with --xdp: also attach the TC egress program, so stack-transmitted traffic is observed (XDP itself is ingress-only)")
 	)
 	flag.Parse()
 
 	if *ifaceName == "" && !*watch && !*watchVXLAN {
 		log.Fatal("need --iface NAME, --watch, or --watch-vxlan")
+	}
+	if *xdpTCEgress && !*xdp {
+		log.Fatal("--xdp-tc-egress requires --xdp (TC mode already observes egress)")
 	}
 	if *nodeID == "" {
 		h, _ := os.Hostname()
@@ -133,6 +141,7 @@ func main() {
 		collectorURL:  *collectorURL,
 		otlpEndpoint:  *otlpEndpoint,
 		xdp:           *xdp,
+		xdpTCEgress:   *xdpTCEgress,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -189,6 +198,9 @@ func run(o opts) error {
 	hook := "tc"
 	if o.xdp {
 		hook = "xdp"
+		if o.xdpTCEgress {
+			hook = "xdp+tc-egress"
+		}
 	}
 	log.Printf("traceflow agent up: hook=%s type=%s node_id=%s respond=%v",
 		hook, ifaceTypeString(o.ifType), o.nodeID, o.respond)
@@ -204,7 +216,7 @@ func run(o opts) error {
 	defer em.close()
 
 	if o.watch {
-		mgr := newTapManager(&objs, o.ifType, o.respond, o.tcpRespond, o.hmacKey, o.xdp)
+		mgr := newTapManager(&objs, o.ifType, o.respond, o.tcpRespond, o.hmacKey, o.xdp, o.xdpTCEgress)
 		defer mgr.closeAll()
 		stop := make(chan struct{})
 		defer close(stop)
@@ -212,7 +224,7 @@ func run(o opts) error {
 		log.Printf("tap watch up: ovs-vsctl every %s", o.watchInterval)
 	}
 	if o.watchVXLAN {
-		vm := newVXLANManager(&objs, o.xdp)
+		vm := newVXLANManager(&objs, o.xdp, o.xdpTCEgress)
 		defer vm.closeAll()
 		stop := make(chan struct{})
 		defer close(stop)
@@ -231,7 +243,7 @@ func attachStatic(objs *traceflowObjects, o opts) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("interface %q: %w", o.ifaceName, err)
 	}
-	detach, err := attachIface(objs, iface.Index, o.xdp)
+	detach, err := attachIface(objs, iface.Index, o.xdp, o.xdpTCEgress)
 	if err != nil {
 		return nil, err
 	}

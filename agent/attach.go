@@ -20,18 +20,23 @@ import (
 // bytes), so no CO-RE relocations are needed for cross-kernel portability.
 // attachIface attaches the observation program to an interface, choosing the
 // XDP hook (for NICs in native/AF_XDP mode, where TC would miss XDP-redirected
-// traffic) or the TC hook. Returns a detach closure.
-func attachIface(objs *traceflowObjects, ifIndex int, xdp bool) (func(), error) {
+// traffic) or the TC hook. XDP is ingress-only; tcEgress additionally attaches
+// the TC egress program (--xdp-tc-egress) so stack-transmitted traffic is
+// observed too. Returns a detach closure.
+func attachIface(objs *traceflowObjects, ifIndex int, xdp, tcEgress bool) (func(), error) {
 	if xdp {
-		return attachXDP(objs, ifIndex)
+		return attachXDP(objs, ifIndex, tcEgress)
 	}
 	return attachProg(objs, ifIndex)
 }
 
 // attachXDP attaches the XDP program, preferring native (driver) mode and
 // falling back to generic (SKB) mode, which works on any netdev (incl. veth).
-// XDP is ingress-only — egress is not observed on this hook.
-func attachXDP(objs *traceflowObjects, ifIndex int) (func(), error) {
+// XDP is ingress-only — with tcEgress the TC egress program is attached
+// alongside, so packets sent by the stack are observed as well. Frames that
+// reach the NIC via XDP_REDIRECT from another interface bypass the stack and
+// TC entirely and remain unobserved either way.
+func attachXDP(objs *traceflowObjects, ifIndex int, tcEgress bool) (func(), error) {
 	l, err := link.AttachXDP(link.XDPOptions{
 		Program: objs.TraceflowXdp, Interface: ifIndex,
 	})
@@ -44,7 +49,49 @@ func attachXDP(objs *traceflowObjects, ifIndex int) (func(), error) {
 		}
 		log.Printf("xdp: native unavailable, using generic (SKB) mode")
 	}
-	return func() { l.Close() }, nil
+	if !tcEgress {
+		return func() { l.Close() }, nil
+	}
+	detachEg, err := attachEgressProg(objs, ifIndex)
+	if err != nil {
+		l.Close()
+		return nil, fmt.Errorf("attach tc egress alongside xdp: %w", err)
+	}
+	return func() { detachEg(); l.Close() }, nil
+}
+
+// attachEgressProg attaches only the TC egress program — the companion for the
+// ingress-only XDP hook. Mechanism preference mirrors attachProg: TCX first,
+// clsact/cls_bpf fallback.
+func attachEgressProg(objs *traceflowObjects, ifIndex int) (func(), error) {
+	if os.Getenv("TRACEFLOW_FORCE_CLSACT") == "1" {
+		log.Printf("TRACEFLOW_FORCE_CLSACT=1: using clsact/cls_bpf (egress)")
+		return attachClsactEgress(objs, ifIndex)
+	}
+	egress, err := link.AttachTCX(link.TCXOptions{
+		Interface: ifIndex, Program: objs.TraceflowEgress, Attach: ebpf.AttachTCXEgress,
+	})
+	if err == nil {
+		return func() { egress.Close() }, nil
+	}
+	if !tcxUnsupported(err) {
+		return nil, fmt.Errorf("attach tcx egress: %w", err)
+	}
+	log.Printf("TCX unavailable (%v); falling back to clsact/cls_bpf", err)
+	return attachClsactEgress(objs, ifIndex)
+}
+
+func attachClsactEgress(objs *traceflowObjects, ifIndex int) (func(), error) {
+	if err := ensureClsact(ifIndex); err != nil {
+		return nil, fmt.Errorf("ensure clsact: %w", err)
+	}
+	if err := addBPFFilter(ifIndex, netlink.HANDLE_MIN_EGRESS, objs.TraceflowEgress, "traceflow_eg"); err != nil {
+		return nil, fmt.Errorf("add egress filter: %w", err)
+	}
+	return func() {
+		delBPFFilter(ifIndex, netlink.HANDLE_MIN_EGRESS)
+		// Leave the clsact qdisc: it may be shared with other tools.
+	}, nil
 }
 
 func attachProg(objs *traceflowObjects, ifIndex int) (func(), error) {

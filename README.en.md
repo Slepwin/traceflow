@@ -128,7 +128,9 @@ control block. With `--hmac-key` a 32-byte HMAC-SHA256 is appended, making the p
 ## What the eBPF program does
 
 The same two-level filter and parsers run on either the **TC** hook (default,
-ingress + egress) or the **XDP** hook (`--xdp`, ingress only). Per packet:
+ingress + egress) or the **XDP** hook (`--xdp`, ingress only; `--xdp-tc-egress`
+additionally attaches the TC egress program to cover the outbound direction).
+Per packet:
 
 ```mermaid
 flowchart TD
@@ -283,7 +285,8 @@ One agent per hypervisor. On startup it:
 **Attach.** The default is the **TC** hook (ingress + egress): **TCX** on kernel ≥ 6.6,
 with an automatic fallback to classic **clsact + cls_bpf** over netlink (down to ~4.5).
 With `--xdp` it attaches at the **XDP** hook instead (ingress only) — see
-[OVS-DPDK / AF_XDP](#ovs-dpdk--af_xdp).
+[OVS-DPDK / AF_XDP](#ovs-dpdk--af_xdp); add `--xdp-tc-egress` to attach the TC
+egress program alongside XDP, so stack-transmitted traffic is observed too.
 
 **Responding.** Observations are captured on *every* hop, but a reply to
 `need_response=1` is built only when the inner `dst_ip` is a local VM address
@@ -322,6 +325,7 @@ answers a probe even though the original is dropped.
 | `--collector-url` | — | POST each observation as JSON to this URL |
 | `--otlp-endpoint` | — | export each observation as an OTLP span |
 | `--xdp` | `false` | attach at XDP instead of TC |
+| `--xdp-tc-egress` | `false` | with `--xdp`: also attach the TC egress program (XDP observes ingress only) |
 
 ---
 
@@ -625,6 +629,7 @@ Each integration test SKIPs cleanly when its prerequisites are missing:
 | `test_hmac.sh` | signed probe answered, unsigned rejected (checked via metrics) |
 | `test_clsact.sh` | the clsact/cls_bpf fallback (`TRACEFLOW_FORCE_CLSACT=1`) |
 | `test_xdp.sh` | the XDP attach path (`--xdp`): program on the netdev, ingress observation |
+| `test_xdp_tc_egress.sh` | `--xdp --xdp-tc-egress`: ingress via XDP + egress via the TC companion |
 | `test_vxlan_2az.sh` | two chassis / two AZs joined by VXLAN (needs OVS) |
 
 ---
@@ -683,7 +688,10 @@ With OVS-DPDK the datapath runs in userspace, so the TC path can miss traffic:
 
   Caveat: only one XDP program can own a netdev unless an `xdp-dispatcher` (libxdp) is
   used; on a NIC that already runs OVS's XDP program, chaining via libxdp is required.
-  XDP here is ingress-only.
+  XDP here is ingress-only: add `--xdp-tc-egress` to attach the TC egress program
+  alongside and observe outbound stack-transmitted traffic as well. Frames that reach
+  the NIC via `XDP_REDIRECT` from another interface bypass both the stack and TC and
+  stay unobserved either way.
 
 - **OVS-DPDK with a DPDK PMD (vfio-pci)** — the NIC is fully owned by the userspace DPDK
   driver, so there is **no kernel netdev** and neither TC nor XDP can attach. Observation

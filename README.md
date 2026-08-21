@@ -130,8 +130,9 @@ TTL не трогает, так что несколько observations на од
 ## Что делает eBPF-программа
 
 Один и тот же двухуровневый фильтр и парсеры работают либо на **TC**-хуке (по
-умолчанию, ingress + egress), либо на **XDP**-хуке (`--xdp`, только ingress). Для
-каждого пакета:
+умолчанию, ingress + egress), либо на **XDP**-хуке (`--xdp`, только ingress;
+`--xdp-tc-egress` дополнительно вешает TC-egress-программу, закрывая исходящее
+направление). Для каждого пакета:
 
 ```mermaid
 flowchart TD
@@ -286,7 +287,8 @@ tests/                 Go unit tests + integration suite (netns / VXLAN / OVN)
 **Attach.** По умолчанию — **TC**-хук (ingress + egress): **TCX** на ядре ≥ 6.6, с
 автоматическим откатом на классический **clsact + cls_bpf** через netlink (примерно до
 4.5). С `--xdp` прикрепляется к **XDP**-хуку (только ingress) — см.
-[OVS-DPDK / AF_XDP](#ovs-dpdk--af_xdp).
+[OVS-DPDK / AF_XDP](#ovs-dpdk--af_xdp); добавьте `--xdp-tc-egress`, чтобы рядом с
+XDP повесить TC-egress-программу и наблюдать также трафик, отправляемый стеком.
 
 **Ответы.** Observations снимаются на *каждом* хопе, но ответ на `need_response=1`
 строится, только если внутренний `dst_ip` — локальный адрес VM (`--local-ip` или
@@ -324,6 +326,7 @@ TC-хука, поэтому он видит и отвечает на пробу,
 | `--collector-url` | — | POST каждой observation как JSON на этот URL |
 | `--otlp-endpoint` | — | экспорт каждой observation как OTLP-span |
 | `--xdp` | `false` | attach на XDP вместо TC |
+| `--xdp-tc-egress` | `false` | вместе с `--xdp`: дополнительно TC-egress-программа (XDP видит только ingress) |
 
 ---
 
@@ -628,6 +631,7 @@ make itest   # интеграционная suite (нужен root; см. ниж
 | `test_hmac.sh` | подписанная проба отвечается, неподписанная отклоняется (по метрикам) |
 | `test_clsact.sh` | clsact/cls_bpf fallback (`TRACEFLOW_FORCE_CLSACT=1`) |
 | `test_xdp.sh` | путь attach через XDP (`--xdp`): программа на netdev, observation на ingress |
+| `test_xdp_tc_egress.sh` | `--xdp --xdp-tc-egress`: ingress через XDP + egress через TC-компаньона |
 | `test_vxlan_2az.sh` | два шасси / две AZ, соединённые VXLAN (нужен OVS) |
 
 ---
@@ -686,7 +690,10 @@ eBPF/TC их не видят — нужен настоящий kernel datapath.)
 
   Оговорка: одна XDP-программа может владеть netdev'ом, если не используется
   `xdp-dispatcher` (libxdp); на NIC, где уже висит XDP-программа OVS, нужен chaining
-  через libxdp. XDP здесь только ingress.
+  через libxdp. XDP здесь только ingress: добавьте `--xdp-tc-egress`, чтобы рядом
+  повесить TC-egress-программу и видеть исходящий трафик, отправляемый стеком.
+  Кадры, попадающие в NIC через `XDP_REDIRECT` с другого интерфейса, минуют и стек,
+  и TC — их не увидит и этот режим.
 
 - **OVS-DPDK с DPDK PMD (vfio-pci)** — NIC полностью во владении userspace DPDK-драйвера,
   поэтому kernel-netdev'а **нет вообще**, и ни TC, ни XDP не прицепить. Наблюдение там

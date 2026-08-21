@@ -13,10 +13,11 @@ import (
 // Attach/detach is driven by netlink link events, so interfaces created or
 // removed by OVN (or any external controller) are followed in real time.
 type vxlanManager struct {
-	objs     *traceflowObjects
-	xdp      bool
-	mu       sync.Mutex
-	attached map[int]*vxlanAttach
+	objs        *traceflowObjects
+	xdp         bool
+	xdpTCEgress bool
+	mu          sync.Mutex
+	attached    map[int]*vxlanAttach
 }
 
 type vxlanAttach struct {
@@ -24,8 +25,8 @@ type vxlanAttach struct {
 	detach func()
 }
 
-func newVXLANManager(objs *traceflowObjects, xdp bool) *vxlanManager {
-	return &vxlanManager{objs: objs, xdp: xdp, attached: map[int]*vxlanAttach{}}
+func newVXLANManager(objs *traceflowObjects, xdp, xdpTCEgress bool) *vxlanManager {
+	return &vxlanManager{objs: objs, xdp: xdp, xdpTCEgress: xdpTCEgress, attached: map[int]*vxlanAttach{}}
 }
 
 func (m *vxlanManager) attach(ifindex int, name string, vni uint32) {
@@ -34,7 +35,7 @@ func (m *vxlanManager) attach(ifindex int, name string, vni uint32) {
 	if _, ok := m.attached[ifindex]; ok {
 		return // idempotent: RTM_NEWLINK also fires on up/down/changes
 	}
-	detach, err := attachIface(m.objs, ifindex, m.xdp)
+	detach, err := attachIface(m.objs, ifindex, m.xdp, m.xdpTCEgress)
 	if err != nil {
 		log.Printf("vxlan: attach %s failed: %v", name, err)
 		return
